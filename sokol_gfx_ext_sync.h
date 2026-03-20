@@ -18,6 +18,7 @@
         #define SOKOL_GLCORE
         #define SOKOL_GLES3
         #define SOKOL_METAL
+        #define SOKOL_VULKAN
 */
 #define SOKOL_GFX_EXT_SYNC_INCLUDED (1)
 
@@ -102,6 +103,19 @@ void _sgext_mtl_wait_for_gpu(void)
     [sync_buffer waitUntilCompleted];
 }
 
+#elif defined(SOKOL_VULKAN)
+
+void _sgext_vk_commit_and_wait(void)
+{
+    sg_commit();
+    vkDeviceWaitIdle((VkDevice)_sg.vk.dev);
+}
+
+void _sgext_vk_wait_for_gpu(void)
+{
+    vkDeviceWaitIdle((VkDevice)_sg.vk.dev);
+}
+
 #endif
 
 // ██████  ██    ██ ██████  ██      ██  ██████
@@ -116,6 +130,8 @@ void sgext_commit_and_wait(void) {
     _sgext_gl_commit_and_wait();
 #elif defined(SOKOL_METAL)
     _sgext_mtl_commit_and_wait();
+#elif defined(SOKOL_VULKAN)
+    _sgext_vk_commit_and_wait();
 #else
 #error "INVALID BACKEND"
 #endif
@@ -127,6 +143,8 @@ void sgext_wait_for_gpu(void)
     _sgext_gl_wait_for_gpu();
 #elif defined(SOKOL_METAL)
     _sgext_mtl_wait_for_gpu();
+#elif defined(SOKOL_VULKAN)
+    _sgext_vk_wait_for_gpu();
 #else
 #error "INVALID BACKEND"
 #endif
