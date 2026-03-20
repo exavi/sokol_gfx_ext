@@ -15,6 +15,8 @@
 
     In the same place define one of the following to select the rendering
     backend:
+        #define SOKOL_GLCORE
+        #define SOKOL_GLES3
         #define SOKOL_METAL
 */
 #define SOKOL_GFX_EXT_SYNC_INCLUDED (1)
@@ -64,7 +66,20 @@ SOKOL_GFX_API_DECL void sgext_wait_for_gpu(void);
 #error "Please include sokol_gfx implementation before sokol_gfx_ext_sync.h implementation"
 #endif
 
-#if defined(SOKOL_METAL)
+#if defined(_SOKOL_ANY_GL)
+
+void _sgext_gl_commit_and_wait(void)
+{
+    sg_commit();
+    glFinish();
+}
+
+void _sgext_gl_wait_for_gpu(void)
+{
+    glFinish();
+}
+
+#elif defined(SOKOL_METAL)
 
 void _sgext_mtl_commit_and_wait(void)
 {
@@ -97,7 +112,9 @@ void _sgext_mtl_wait_for_gpu(void)
 //
 // >>public
 void sgext_commit_and_wait(void) {
-#if defined(SOKOL_METAL)
+#if defined(_SOKOL_ANY_GL)
+    _sgext_gl_commit_and_wait();
+#elif defined(SOKOL_METAL)
     _sgext_mtl_commit_and_wait();
 #else
 #error "INVALID BACKEND"
@@ -106,7 +123,9 @@ void sgext_commit_and_wait(void) {
 
 void sgext_wait_for_gpu(void)
 {
-#if defined(SOKOL_METAL)
+#if defined(_SOKOL_ANY_GL)
+    _sgext_gl_wait_for_gpu();
+#elif defined(SOKOL_METAL)
     _sgext_mtl_wait_for_gpu();
 #else
 #error "INVALID BACKEND"
