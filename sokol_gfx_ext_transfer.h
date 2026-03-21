@@ -18,7 +18,7 @@
     High-performance GPU-to-CPU texture readback for Sokol gfx, optimized for
     per-transfer with minimal stalls.
 
-    - Double-buffered async readback (staging buffers on Metal)
+    - Double-buffered async readback (PBO on OpenGL, staging buffers on Metal)
     - Persistent transfer buffer objects (create once, reuse per frame)
     - Direct texture-to-texture copy operations
     - Supports capturing from any sg_view (render targets, texture views, etc.)
@@ -60,6 +60,7 @@
     SOKOL_GLCORE
     SOKOL_GLES3
     SOKOL_METAL
+    SOKOL_VULKAN
 */
 #define SOKOL_GFX_EXT_TRANSFER_INCLUDED (1)
 
@@ -660,6 +661,399 @@ static sg_range _sgext_mtl_transfer_get_data_range(sgext_transfer_buffer cap_buf
     return (sg_range){src, buf->data_size};
 }
 
+#elif defined(SOKOL_VULKAN)
+
+typedef struct _sgext_vk_transfer_buffer {
+    uint32_t _start_canary;
+    const _sg_image_t* img;
+    VkBuffer staging_buffers[SG_NUM_INFLIGHT_FRAMES];
+    VkDeviceMemory staging_memories[SG_NUM_INFLIGHT_FRAMES];
+    int active_slot;
+    size_t data_size;
+    void* cpu_buffer;  // Persistent CPU-side copy
+    uint32_t _end_canary;
+} _sgext_vk_transfer_buffer;
+
+typedef _sgext_vk_transfer_buffer _sgext_transfer_buffer;
+
+static sgext_transfer_buffer _sgext_vk_make_transfer_buffer(const sgext_transfer_desc* desc)
+{
+    SOKOL_ASSERT(desc);
+    SOKOL_ASSERT(desc->view.id != SG_INVALID_ID);
+
+    _sgext_transfer_buffer* buf = (_sgext_transfer_buffer*)_sg_malloc_clear(sizeof(_sgext_transfer_buffer));
+    buf->_start_canary = 0x12345678;
+    buf->_end_canary = 0x87654321;
+
+    const _sg_view_t* view = _sg_lookup_view(desc->view.id);
+    if (!view) {
+        _sg_free(buf);
+        return (sgext_transfer_buffer){0, 0};
+    }
+
+    const _sg_image_t* img = _sg_image_ref_ptr(&view->cmn.img.ref);
+    if (!img) {
+        _sg_free(buf);
+        return (sgext_transfer_buffer){0, 0};
+    }
+
+    buf->img = img;
+
+    sg_pixelformat_info format_info = sg_query_pixelformat(img->cmn.pixel_format);
+    buf->data_size = img->cmn.width * img->cmn.height * format_info.bytes_per_pixel;
+
+    buf->cpu_buffer = _sg_malloc(buf->data_size);
+
+    VkDevice dev = (VkDevice)_sg.vk.dev;
+    VkPhysicalDevice phys_dev = (VkPhysicalDevice)_sg.vk.phys_dev;
+
+    // Create staging buffers for each slot
+    for (int i = 0; i < SG_NUM_INFLIGHT_FRAMES; i++) {
+        VkBufferCreateInfo buffer_info = {};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = buf->data_size;
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VkResult res = vkCreateBuffer(dev, &buffer_info, 0, &buf->staging_buffers[i]);
+        if (res != VK_SUCCESS) {
+            for (int j = 0; j < i; j++) {
+                vkDestroyBuffer(dev, buf->staging_buffers[j], 0);
+            }
+            _sg_free(buf->cpu_buffer);
+            _sg_free(buf);
+            return (sgext_transfer_buffer){0, 0};
+        }
+
+        // Allocate host-visible, host-coherent memory
+        VkMemoryRequirements mem_reqs;
+        vkGetBufferMemoryRequirements(dev, buf->staging_buffers[i], &mem_reqs);
+
+        VkPhysicalDeviceMemoryProperties mem_props;
+        vkGetPhysicalDeviceMemoryProperties(phys_dev, &mem_props);
+
+        uint32_t memory_type_index = UINT32_MAX;
+        VkMemoryPropertyFlags required_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+        for (uint32_t j = 0; j < mem_props.memoryTypeCount; j++) {
+            if ((mem_reqs.memoryTypeBits & (1 << j)) &&
+                (mem_props.memoryTypes[j].propertyFlags & required_flags) == required_flags) {
+                memory_type_index = j;
+                break;
+            }
+        }
+
+        if (memory_type_index == UINT32_MAX) {
+            for (int j = 0; j <= i; j++) {
+                vkDestroyBuffer(dev, buf->staging_buffers[j], 0);
+            }
+            _sg_free(buf->cpu_buffer);
+            _sg_free(buf);
+            return (sgext_transfer_buffer){0, 0};
+        }
+
+        VkMemoryAllocateInfo alloc_info = {};
+        alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize = mem_reqs.size;
+        alloc_info.memoryTypeIndex = memory_type_index;
+
+        res = vkAllocateMemory(dev, &alloc_info, 0, &buf->staging_memories[i]);
+        if (res != VK_SUCCESS) {
+            for (int j = 0; j <= i; j++) {
+                vkDestroyBuffer(dev, buf->staging_buffers[j], 0);
+            }
+            _sg_free(buf->cpu_buffer);
+            _sg_free(buf);
+            return (sgext_transfer_buffer){0, 0};
+        }
+
+        vkBindBufferMemory(dev, buf->staging_buffers[i], buf->staging_memories[i], 0);
+    }
+
+    buf->active_slot = 0;
+
+    return (sgext_transfer_buffer){buf, sizeof(_sgext_transfer_buffer)};
+}
+
+static void _sgext_vk_transfer_copy(sgext_transfer_buffer buf_dst)
+{
+    _sgext_transfer_buffer* buf = (_sgext_transfer_buffer*)buf_dst.ptr;
+    SOKOL_ASSERT(buf);
+
+    _sg_image_t* img = (_sg_image_t*)buf->img;
+
+    VkCommandBuffer cmd_buf = (VkCommandBuffer)_sg.vk.frame.cmd_buf;
+    SOKOL_ASSERT(cmd_buf);
+
+    VkBuffer staging = buf->staging_buffers[buf->active_slot];
+
+    VkImage src_image = (VkImage)img->vk.img;
+
+    // Manually transition to transfer src and back (sokol doesn't have transfer-read access type)
+    // Using vkCmdPipelineBarrier2 to match sokol's barrier style
+    _sg_vk_access_t old_access = img->vk.cur_access;
+
+    VkImageMemoryBarrier2 barriers[2] = {};
+
+    // Barrier 1: transition to TRANSFER_SRC_OPTIMAL
+    barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barriers[0].srcStageMask = _sg_vk_src_stage_mask(old_access);
+    barriers[0].srcAccessMask = _sg_vk_src_access_mask(old_access);
+    barriers[0].oldLayout = _sg_vk_image_layout(old_access);
+    barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barriers[0].dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barriers[0].image = src_image;
+    barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barriers[0].subresourceRange.baseMipLevel = 0;
+    barriers[0].subresourceRange.levelCount = 1;
+    barriers[0].subresourceRange.baseArrayLayer = 0;
+    barriers[0].subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dep_info = {};
+    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep_info.imageMemoryBarrierCount = 1;
+    dep_info.pImageMemoryBarriers = &barriers[0];
+    vkCmdPipelineBarrier2(cmd_buf, &dep_info);
+
+    // Copy image to buffer
+    VkBufferImageCopy region = {};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset.x = 0;
+    region.imageOffset.y = 0;
+    region.imageOffset.z = 0;
+    region.imageExtent.width = (uint32_t)img->cmn.width;
+    region.imageExtent.height = (uint32_t)img->cmn.height;
+    region.imageExtent.depth = 1;
+
+    vkCmdCopyImageToBuffer(cmd_buf, src_image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+
+    // Barrier 2: transition back to COLOR_ATTACHMENT_OPTIMAL
+    barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barriers[1].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    barriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barriers[1].dstStageMask = _sg_vk_dst_stage_mask(_SG_VK_ACCESS_COLOR_ATTACHMENT);
+    barriers[1].dstAccessMask = _sg_vk_dst_access_mask(_SG_VK_ACCESS_COLOR_ATTACHMENT);
+    barriers[1].newLayout = _sg_vk_image_layout(_SG_VK_ACCESS_COLOR_ATTACHMENT);
+    barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barriers[1].image = src_image;
+    barriers[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barriers[1].subresourceRange.baseMipLevel = 0;
+    barriers[1].subresourceRange.levelCount = 1;
+    barriers[1].subresourceRange.baseArrayLayer = 0;
+    barriers[1].subresourceRange.layerCount = 1;
+
+    dep_info.imageMemoryBarrierCount = 1;
+    dep_info.pImageMemoryBarriers = &barriers[1];
+    vkCmdPipelineBarrier2(cmd_buf, &dep_info);
+
+    // Update sokol's state tracking to match final layout
+    img->vk.cur_access = _SG_VK_ACCESS_COLOR_ATTACHMENT;
+
+    // No vkEndCommandBuffer, no vkQueueSubmit - sokol handles it in sg_commit()
+    // Commands will be submitted when sg_commit() is called
+
+    // Rotate slot
+    buf->active_slot = (buf->active_slot + 1) % SG_NUM_INFLIGHT_FRAMES;
+}
+
+static void _sgext_vk_transfer_read(sgext_transfer_buffer cap_buf, uint32_t x, uint32_t y, void* dst, size_t size)
+{
+    _sgext_transfer_buffer* buf = (_sgext_transfer_buffer*)cap_buf.ptr;
+    SOKOL_ASSERT(buf);
+
+    VkDevice dev = (VkDevice)_sg.vk.dev;
+
+    // Get previous slot - data from 1-2 frames ago
+    int read_slot = (buf->active_slot + 1) % SG_NUM_INFLIGHT_FRAMES;
+
+    // Map memory (no fence wait needed - frame rotation ensures data is ready)
+    void* mapped_data;
+    vkMapMemory(dev, buf->staging_memories[read_slot], 0, buf->data_size, 0, &mapped_data);
+
+    // Calculate offset
+    const _sg_image_t* img = buf->img;
+    sg_pixelformat_info format_info = sg_query_pixelformat(img->cmn.pixel_format);
+    size_t offset = (y * img->cmn.width + x) * format_info.bytes_per_pixel;
+
+    // Copy data
+    memcpy(dst, (uint8_t*)mapped_data + offset, size);
+
+    // Unmap
+    vkUnmapMemory(dev, buf->staging_memories[read_slot]);
+}
+
+static sg_range _sgext_vk_transfer_get_data_range(sgext_transfer_buffer cap_buf)
+{
+    _sgext_transfer_buffer* buf = (_sgext_transfer_buffer*)cap_buf.ptr;
+    SOKOL_ASSERT(buf);
+
+    VkDevice dev = (VkDevice)_sg.vk.dev;
+
+    // Get previous slot - data from 1-2 frames ago
+    int read_slot = (buf->active_slot + 1) % SG_NUM_INFLIGHT_FRAMES;
+
+    // Map, copy to CPU buffer, unmap
+    // No fence wait needed - frame rotation ensures data is ready
+    void* mapped_data;
+    vkMapMemory(dev, buf->staging_memories[read_slot], 0, buf->data_size, 0, &mapped_data);
+    memcpy(buf->cpu_buffer, mapped_data, buf->data_size);
+    vkUnmapMemory(dev, buf->staging_memories[read_slot]);
+
+    // Return persistent CPU buffer pointer (safe for caller to hold)
+    return (sg_range){buf->cpu_buffer, buf->data_size};
+}
+
+static void _sgext_vk_destroy_transfer_buffer(sgext_transfer_buffer cap_buf)
+{
+    _sgext_transfer_buffer* buf = (_sgext_transfer_buffer*)cap_buf.ptr;
+    if (!buf) return;
+
+    VkDevice dev = (VkDevice)_sg.vk.dev;
+
+    // Wait for device to be idle before cleanup (safer than per-fence wait)
+    vkDeviceWaitIdle(dev);
+
+    // Cleanup staging buffers and memories
+    for (int i = 0; i < SG_NUM_INFLIGHT_FRAMES; i++) {
+        if (buf->staging_buffers[i] != VK_NULL_HANDLE) {
+            vkDestroyBuffer(dev, buf->staging_buffers[i], 0);
+        }
+        if (buf->staging_memories[i] != VK_NULL_HANDLE) {
+            vkFreeMemory(dev, buf->staging_memories[i], 0);
+        }
+    }
+
+    if (buf->cpu_buffer) {
+        _sg_free(buf->cpu_buffer);
+    }
+
+    _sg_free(buf);
+}
+
+static bool _sgext_vk_is_valid_transfer_buffer(sgext_transfer_buffer cap_buf)
+{
+    if (!cap_buf.ptr) return false;
+    _sgext_transfer_buffer* buf = (_sgext_transfer_buffer*)cap_buf.ptr;
+    return buf->staging_buffers[0] != VK_NULL_HANDLE && buf->cpu_buffer != NULL;
+}
+
+static void _sgext_vk_copy_view_to_image(sg_view src_view, sg_image dst_image)
+{
+    const _sg_view_t* view = _sg_lookup_view(src_view.id);
+    if (!view) return;
+
+    _sg_image_t* src_img = (_sg_image_t*)_sg_image_ref_ptr(&view->cmn.img.ref);
+    if (!src_img) return;
+
+    _sg_image_t* dst_img = (_sg_image_t*)_sg_lookup_image(dst_image.id);
+    if (!dst_img) return;
+
+    // Use sokol's command buffer uses _sg.mtl.cmd_buffer)
+    VkCommandBuffer cmd_buf = (VkCommandBuffer)_sg.vk.frame.cmd_buf;
+    SOKOL_ASSERT(cmd_buf);
+
+    // Get old access states before transitions
+    _sg_vk_access_t src_old_access = src_img->vk.cur_access;
+    _sg_vk_access_t dst_old_access = dst_img->vk.cur_access;
+
+    // Prepare barriers for both images (before copy)
+    VkImageMemoryBarrier2 barriers[2] = {};
+
+    // Source: transition to TRANSFER_SRC_OPTIMAL
+    barriers[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barriers[0].srcStageMask = _sg_vk_src_stage_mask(src_old_access);
+    barriers[0].srcAccessMask = _sg_vk_src_access_mask(src_old_access);
+    barriers[0].oldLayout = _sg_vk_image_layout(src_old_access);
+    barriers[0].dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barriers[0].dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    barriers[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barriers[0].image = (VkImage)src_img->vk.img;
+    barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barriers[0].subresourceRange.baseMipLevel = 0;
+    barriers[0].subresourceRange.levelCount = 1;
+    barriers[0].subresourceRange.baseArrayLayer = 0;
+    barriers[0].subresourceRange.layerCount = 1;
+
+    // Dest: transition to TRANSFER_DST_OPTIMAL
+    barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barriers[1].srcStageMask = _sg_vk_src_stage_mask(dst_old_access);
+    barriers[1].srcAccessMask = _sg_vk_src_access_mask(dst_old_access);
+    barriers[1].oldLayout = _sg_vk_image_layout(dst_old_access);
+    barriers[1].dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barriers[1].dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barriers[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barriers[1].image = (VkImage)dst_img->vk.img;
+    barriers[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barriers[1].subresourceRange.baseMipLevel = 0;
+    barriers[1].subresourceRange.levelCount = 1;
+    barriers[1].subresourceRange.baseArrayLayer = 0;
+    barriers[1].subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dep_info = {};
+    dep_info.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep_info.imageMemoryBarrierCount = 2;
+    dep_info.pImageMemoryBarriers = barriers;
+    vkCmdPipelineBarrier2(cmd_buf, &dep_info);
+
+    // Copy
+    VkImageCopy region = {};
+    region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.srcSubresource.mipLevel = 0;
+    region.srcSubresource.baseArrayLayer = 0;
+    region.srcSubresource.layerCount = 1;
+    region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.dstSubresource.mipLevel = 0;
+    region.dstSubresource.baseArrayLayer = 0;
+    region.dstSubresource.layerCount = 1;
+    region.extent.width = (uint32_t)src_img->cmn.width;
+    region.extent.height = (uint32_t)src_img->cmn.height;
+    region.extent.depth = 1;
+
+    vkCmdCopyImage(cmd_buf,
+        (VkImage)src_img->vk.img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        (VkImage)dst_img->vk.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1, &region);
+
+    // Transition both back (source to COLOR_ATTACHMENT, dest to TEXTURE)
+    barriers[0].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barriers[0].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barriers[0].dstStageMask = _sg_vk_dst_stage_mask(_SG_VK_ACCESS_COLOR_ATTACHMENT);
+    barriers[0].dstAccessMask = _sg_vk_dst_access_mask(_SG_VK_ACCESS_COLOR_ATTACHMENT);
+    barriers[0].newLayout = _sg_vk_image_layout(_SG_VK_ACCESS_COLOR_ATTACHMENT);
+
+    barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    barriers[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    barriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barriers[1].dstStageMask = _sg_vk_dst_stage_mask(_SG_VK_ACCESS_TEXTURE);
+    barriers[1].dstAccessMask = _sg_vk_dst_access_mask(_SG_VK_ACCESS_TEXTURE);
+    barriers[1].newLayout = _sg_vk_image_layout(_SG_VK_ACCESS_TEXTURE);
+
+    dep_info.imageMemoryBarrierCount = 2;
+    dep_info.pImageMemoryBarriers = barriers;
+    vkCmdPipelineBarrier2(cmd_buf, &dep_info);
+
+    // Update sokol's state tracking to match final layouts
+    src_img->vk.cur_access = _SG_VK_ACCESS_COLOR_ATTACHMENT;
+    dst_img->vk.cur_access = _SG_VK_ACCESS_TEXTURE;
+}
+
 #endif
 
 
@@ -673,6 +1067,8 @@ sgext_transfer_buffer sgext_make_transfer_buffer(const sgext_transfer_desc* desc
     return _sgext_gl_make_transfer_buffer(desc);
 #elif defined(SOKOL_METAL)
     return _sgext_mtl_make_transfer_buffer(desc);
+#elif defined(SOKOL_VULKAN)
+    return _sgext_vk_make_transfer_buffer(desc);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -684,6 +1080,8 @@ void sgext_destroy_transfer_buffer(sgext_transfer_buffer buf)
     _sgext_gl_destroy_transfer_buffer(buf);
 #elif defined(SOKOL_METAL)
     _sgext_mtl_destroy_transfer_buffer(buf);
+#elif defined(SOKOL_VULKAN)
+    _sgext_vk_destroy_transfer_buffer(buf);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -695,6 +1093,8 @@ bool sgext_is_valid_transfer_buffer(sgext_transfer_buffer cap_buf)
     return _sgext_gl_is_valid_transfer_buffer(cap_buf);
 #elif defined(SOKOL_METAL)
     return _sgext_mtl_is_valid_transfer_buffer(cap_buf);
+#elif defined(SOKOL_VULKAN)
+    return _sgext_vk_is_valid_transfer_buffer(cap_buf);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -706,6 +1106,8 @@ void sgext_transfer_copy(sgext_transfer_buffer buf)
     _sgext_gl_transfer_copy(buf);
 #elif defined(SOKOL_METAL)
     _sgext_mtl_transfer_copy(buf);
+#elif defined(SOKOL_VULKAN)
+    _sgext_vk_transfer_copy(buf);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -717,6 +1119,8 @@ void sgext_transfer_read(sgext_transfer_buffer cap_buf, uint32_t start_x, uint32
     _sgext_gl_transfer_read(cap_buf, start_x, start_y, dst, size);
 #elif defined(SOKOL_METAL)
     _sgext_mtl_transfer_read(cap_buf, start_x, start_y, dst, size);
+#elif defined(SOKOL_VULKAN)
+    _sgext_vk_transfer_read(cap_buf, start_x, start_y, dst, size);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -728,6 +1132,8 @@ sg_range sgext_transfer_get_data_range(sgext_transfer_buffer cap_buf)
     return _sgext_gl_transfer_get_data_range(cap_buf);
 #elif defined(SOKOL_METAL)
     return _sgext_mtl_transfer_get_data_range(cap_buf);
+#elif defined(SOKOL_VULKAN)
+    return _sgext_vk_transfer_get_data_range(cap_buf);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -739,6 +1145,8 @@ void sgext_copy_view_to_image(sg_view src_view, sg_image dst_image)
     _sgext_gl_copy_view_to_image(src_view, dst_image);
 #elif defined(SOKOL_METAL)
     _sgext_mtl_copy_view_to_image(src_view, dst_image);
+#elif defined(SOKOL_VULKAN)
+    _sgext_vk_copy_view_to_image(src_view, dst_image);
 #else
 #error "INVALID BACKEND"
 #endif
