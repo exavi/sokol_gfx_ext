@@ -193,9 +193,6 @@ SOKOL_GFX_API_DECL void sgext_copy_view_to_image(sg_view src_view, sg_image dst_
 #error "Please include sokol_gfx implementation before sokol_gfx_ext_transfer.h implementation"
 #endif
 
-// ========================================
-// OpenGL Implementation
-// ========================================
 #if defined(_SOKOL_ANY_GL)
 
 typedef struct _sgext_gl_mutable_range {
@@ -484,9 +481,6 @@ static void _sgext_gl_copy_view_to_image(sg_view src_view, sg_image dst_image)
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
 
-// ========================================
-// Metal Implementation
-// ========================================
 #elif defined(SOKOL_METAL)
 
 typedef struct _sgext_mtl_transfer_buffer {
