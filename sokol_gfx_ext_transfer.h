@@ -339,6 +339,11 @@ static void _sgext_gl_teximage_read_mode_type_format(sg_pixel_format fmt, GLenum
             format = GL_RED;
             type = GL_FLOAT;
             break;
+        case SG_PIXELFORMAT_RGB10A2:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_RGBA;
+            type = GL_UNSIGNED_INT_2_10_10_10_REV;
+            break; 
         default:
             SOKOL_UNREACHABLE;
     }
