@@ -301,6 +301,49 @@ static bool _sgext_gl_is_valid_transfer_buffer(sgext_transfer_buffer cap_buf)
     return buf->pixel_data.ptr && buf->pixel_data.size;
 }
 
+static void _sgext_gl_teximage_read_mode_type_format(sg_pixel_format fmt, GLenum& mode, GLenum& format, GLenum& type)
+{
+    switch (fmt) {
+        case SG_PIXELFORMAT_DEPTH:
+            mode = GL_NONE;
+            format = GL_DEPTH_COMPONENT;
+            type = GL_FLOAT;
+            break;
+        case SG_PIXELFORMAT_DEPTH_STENCIL:
+            mode = GL_NONE;
+            format = GL_DEPTH_STENCIL;
+            type = GL_UNSIGNED_INT_24_8;
+            break;
+        case SG_PIXELFORMAT_R32UI:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_RED_INTEGER;
+            type = GL_UNSIGNED_INT;
+            break;
+        case SG_PIXELFORMAT_RGBA8:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_RGBA;
+            type = GL_UNSIGNED_BYTE;
+            break;
+        case SG_PIXELFORMAT_BGRA8:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_BGRA;
+            type = GL_UNSIGNED_BYTE;
+            break;
+        case SG_PIXELFORMAT_RGBA32F:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_RGBA;
+            type = GL_FLOAT;
+            break;
+        case SG_PIXELFORMAT_R32F:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_RED;
+            type = GL_FLOAT;
+            break;
+        default:
+            SOKOL_UNREACHABLE;
+    }
+}
+
 static void _sgext_gl_transfer_begin_readback(_sgext_transfer_buffer* buf)
 {
     const _sg_image_t* img = buf->img;
@@ -321,31 +364,11 @@ static void _sgext_gl_transfer_begin_readback(_sgext_transfer_buffer* buf)
 
     glBindBuffer(GL_PIXEL_PACK_BUFFER, buf->pbos[buf->active_slot]);
 
-    if (img->cmn.pixel_format == SG_PIXELFORMAT_DEPTH)
-    {
-        glReadBuffer(GL_NONE);
-        glReadPixels(0, 0, img->cmn.width, img->cmn.height, GL_DEPTH_COMPONENT, GL_FLOAT, 0);
-    }
-    else if (img->cmn.pixel_format == SG_PIXELFORMAT_DEPTH_STENCIL)
-    {
-        glReadBuffer(GL_NONE);
-        glReadPixels(0, 0, img->cmn.width, img->cmn.height, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, 0);
-    }
-    else if (img->cmn.pixel_format == SG_PIXELFORMAT_R32UI)
-    {
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glReadPixels(0, 0, img->cmn.width, img->cmn.height, GL_RED_INTEGER, GL_UNSIGNED_INT, 0);
-    }
-    else if (img->cmn.pixel_format == SG_PIXELFORMAT_RGBA8)
-    {
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glReadPixels(0, 0, img->cmn.width, img->cmn.height, GL_RGBA, GL_UNSIGNED_BYTE, 0);
-    }
-    else if (img->cmn.pixel_format == SG_PIXELFORMAT_BGRA8)
-    {
-        glReadBuffer(GL_COLOR_ATTACHMENT0);
-        glReadPixels(0, 0, img->cmn.width, img->cmn.height, GL_BGRA, GL_UNSIGNED_BYTE, 0);
-    }
+    GLenum mode, format, type;
+    _sgext_gl_teximage_read_mode_type_format(img->cmn.pixel_format, mode, format, type);
+
+    glReadBuffer(mode);
+    glReadPixels(0, 0, img->cmn.width, img->cmn.height, format, type, 0);
 
     if (buf->fences[buf->active_slot])
         glDeleteSync(buf->fences[buf->active_slot]);
