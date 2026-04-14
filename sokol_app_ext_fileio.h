@@ -36,9 +36,14 @@ struct saext_file_dialog_desc_t {
     const char* message;      // optional message to display in the file dialog
     const char* default_path; // optional default path to open in the file dialog
     bool multiple;            // allow multiple file selection
+    bool pick_directories;    // if true, allow picking directories instead of files
     saext_file_filter_t* filters; // optional array of file filters
     int num_filters;
 };
+
+SOKOL_APP_API_DECL void saext_fileio_setup(void);
+SOKOL_APP_API_DECL void saext_fileio_shutdown(void);
+SOKOL_APP_API_DECL void saext_fileio_process(void);
 
 SOKOL_APP_API_DECL void saext_fileio_pick_open(const saext_file_dialog_desc_t* desc, void* user_data, saext_file_callback_t callback);
 
@@ -66,7 +71,7 @@ SOKOL_APP_API_DECL void saext_fileio_pick_open(const saext_file_dialog_desc_t* d
 
 #include <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-NSMutableArray<UTType*>* _sapp_ext_apple_file_dialog_types(const saext_file_filter_t* filters, int num_filters) {
+NSMutableArray<UTType*>* _sapp_ext_apple_fileio_dialog_types(const saext_file_filter_t* filters, int num_filters) {
     NSMutableArray<UTType*>* types = [NSMutableArray arrayWithCapacity:num_filters];
     for (int i = 0; i < num_filters; i++) {
         const saext_file_filter_t* filter = &filters[i];
@@ -92,15 +97,15 @@ NSMutableArray<UTType*>* _sapp_ext_apple_file_dialog_types(const saext_file_filt
 
 #if defined(_SAPP_MACOS)
 
-void _sapp_ext_macos_pick_file_or_directory(const saext_file_dialog_desc_t* desc, void* user_data, saext_file_callback_t callback, bool pick_directories)
+void _sapp_ext_macos_fileio_pick_open(const saext_file_dialog_desc_t* desc, void* user_data, saext_file_callback_t callback)
 {
     NSOpenPanel* panel = [NSOpenPanel openPanel];
-    panel.canChooseFiles = !pick_directories;
-    panel.canChooseDirectories = pick_directories;
+    panel.canChooseFiles = !desc->pick_directories;
+    panel.canChooseDirectories = desc->pick_directories;
     panel.allowsMultipleSelection = desc->multiple;
 
-    if (!pick_directories && desc->num_filters > 0) {
-        panel.allowedContentTypes = _sapp_ext_apple_file_dialog_types(desc->filters, desc->num_filters);
+    if (!desc->pick_directories && desc->num_filters > 0) {
+        panel.allowedContentTypes = _sapp_ext_apple_fileio_dialog_types(desc->filters, desc->num_filters);
     }
 
     if (desc->message) {
@@ -140,11 +145,6 @@ void _sapp_ext_macos_pick_file_or_directory(const saext_file_dialog_desc_t* desc
             callback(user_data, NULL, 0, true);
         }
     }];
-}
-
-void _sapp_ext_macos_pick_files(const saext_file_dialog_desc_t* desc, void* user_data, saext_file_callback_t callback)
-{
-    _sapp_ext_macos_pick_file_or_directory(desc, user_data, callback, false);
 }
 
 #elif defined(_SAPP_IOS)
@@ -258,13 +258,13 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls
 
 @end
 
-void _sapp_ext_ios_pick_file_or_directory(const saext_file_dialog_desc_t* desc, void* user_data, saext_file_callback_t callback, bool pick_directories)
+void _sapp_ext_ios_fileio_pick_open(const saext_file_dialog_desc_t* desc, void* user_data, saext_file_callback_t callback)
 {
     NSArray<UTType*>* content_types = nil;
-    if (pick_directories) {
+    if (desc->pick_directories) {
         content_types = @[UTTypeFolder];
     }else if (desc->filters != NULL && desc->num_filters > 0) {
-        content_types = _sapp_ext_apple_file_dialog_types(desc->filters, desc->num_filters);
+        content_types = _sapp_ext_apple_fileio_dialog_types(desc->filters, desc->num_filters);
     }
 
     BlockDocumentPickerViewController* picker = [[BlockDocumentPickerViewController alloc] initForOpeningContentTypes:content_types];
@@ -311,11 +311,6 @@ void _sapp_ext_ios_pick_file_or_directory(const saext_file_dialog_desc_t* desc, 
     [[UIApplication sharedApplication].topMostViewController presentViewController:picker animated:YES completion:nil];
 }
 
-void _sapp_ext_ios_pick_files(const saext_file_dialog_desc_t* desc, void* user_data, saext_file_callback_t callback)
-{
-    _sapp_ext_ios_pick_file_or_directory(desc, user_data, callback, false);
-}
-
 #endif
 
 // ██████  ██    ██ ██████  ██      ██  ██████
@@ -329,11 +324,23 @@ void _sapp_ext_ios_pick_files(const saext_file_dialog_desc_t* desc, void* user_d
 extern "C" {
 #endif
 
+SOKOL_APP_API_DECL void saext_fileio_setup()
+{
+}
+
+SOKOL_APP_API_DECL void saext_fileio_shutdown()
+{
+}
+
+SOKOL_APP_API_DECL void saext_fileio_process()
+{
+}
+
 void saext_fileio_pick_open(const saext_file_dialog_desc_t* desc, void* user_data, saext_file_callback_t callback) {
 #if defined(_SAPP_MACOS)
-    _sapp_ext_macos_pick_files(desc, user_data, callback);
+    _sapp_ext_macos_fileio_pick_open(desc, user_data, callback);
 #elif defined(_SAPP_IOS)
-    _sapp_ext_ios_pick_files(desc, user_data, callback);
+    _sapp_ext_ios_fileio_pick_open(desc, user_data, callback);
 #else
 #error "INVALID BACKEND"
 #endif
