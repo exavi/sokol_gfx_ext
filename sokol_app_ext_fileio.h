@@ -39,6 +39,7 @@ struct saext_file_dialog_desc_t {
     bool pick_directories;    // if true, allow picking directories instead of files
     saext_file_filter_t* filters; // optional array of file filters
     int num_filters;
+    int default_filter;       // index of the default filter in the filters array
 };
 
 SOKOL_APP_API_DECL void saext_fileio_setup(void);
