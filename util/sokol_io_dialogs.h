@@ -594,7 +594,11 @@ void _siodlg_ios_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <libgen.h>
+#include <sys/stat.h>
 #include <systemd/sd-bus.h>
 
 typedef struct {
@@ -703,6 +707,60 @@ static const char* _siodlg_uri_to_path(const char* uri) {
     return uri;
 }
 
+// Parse the "uris" key from a portal Response a{sv} message.
+// Advances the message cursor past the a{sv} container.
+// On success returns a heap-allocated array of strdup'd paths and sets *out_n.
+// Returns NULL (and *out_n = 0) if the key was not found or on parse error.
+// Caller is responsible for freeing each element and the array itself.
+static char** _siodlg_parse_response_uris(sd_bus_message* msg, int* out_n) {
+    *out_n = 0;
+    if (sd_bus_message_enter_container(msg, 'a', "{sv}") < 0) return NULL;
+
+    char** paths = NULL;
+    const char* key = NULL;
+    while (sd_bus_message_enter_container(msg, 'e', "sv") > 0) {
+        if (sd_bus_message_read(msg, "s", &key) < 0) {
+            sd_bus_message_exit_container(msg); /* e */
+            break;
+        }
+        if (strcmp(key, "uris") == 0) {
+            if (sd_bus_message_enter_container(msg, 'v', NULL) < 0) {
+                sd_bus_message_exit_container(msg); /* e */
+                break;
+            }
+            if (sd_bus_message_enter_container(msg, 'a', "s") < 0) {
+                sd_bus_message_exit_container(msg); /* v */
+                sd_bus_message_exit_container(msg); /* e */
+                break;
+            }
+            const char* uri = NULL;
+            int cap = 0, n = 0;
+            while (sd_bus_message_read(msg, "s", &uri) > 0) {
+                if (n + 1 > cap) {
+                    cap = cap ? cap * 2 : 4;
+                    paths = (char**)realloc(paths, cap * sizeof(char*));
+                }
+                paths[n++] = strdup(_siodlg_uri_to_path(uri));
+            }
+            sd_bus_message_exit_container(msg); /* a */
+            sd_bus_message_exit_container(msg); /* v */
+            sd_bus_message_exit_container(msg); /* e */
+            sd_bus_message_exit_container(msg); /* a{sv} */
+            *out_n = n;
+            return paths;
+        } else {
+            // Skip unknown variant values
+            if (sd_bus_message_skip(msg, "v") < 0) {
+                sd_bus_message_exit_container(msg); /* e */
+                break;
+            }
+        }
+        sd_bus_message_exit_container(msg); /* e */
+    }
+    sd_bus_message_exit_container(msg); /* a{sv} */
+    return NULL;
+}
+
 typedef struct {
     void*                  user_data;
     siodlg_file_open_callback_t callback;
@@ -723,53 +781,15 @@ static int _siodlg_response_cb(sd_bus_message* msg, void* userdata, sd_bus_error
         goto cleanup;
     }
 
-    // Parse the a{sv} results dict looking for the "uris" key
-    if (sd_bus_message_enter_container(msg, 'a', "{sv}") < 0) goto fail;
     {
-        const char* key = NULL;
-        while (sd_bus_message_enter_container(msg, 'e', "sv") > 0) {
-            if (sd_bus_message_read(msg, "s", &key) < 0) {
-                sd_bus_message_exit_container(msg); /* e */
-                break;
-            }
-            if (strcmp(key, "uris") == 0) {
-                if (sd_bus_message_enter_container(msg, 'v', NULL) < 0) {
-                    sd_bus_message_exit_container(msg); /* e */
-                    break;
-                }
-                if (sd_bus_message_enter_container(msg, 'a', "s") < 0) {
-                    sd_bus_message_exit_container(msg); /* v */
-                    sd_bus_message_exit_container(msg); /* e */
-                    break;
-                }
-                const char* uri = NULL;
-                int cap = 0, n = 0;
-                char** paths = NULL;
-                while (sd_bus_message_read(msg, "s", &uri) > 0) {
-                    if (n + 1 > cap) {
-                        cap = cap ? cap * 2 : 4;
-                        paths = (char**)realloc(paths, cap * sizeof(char*));
-                    }
-                    paths[n++] = strdup(_siodlg_uri_to_path(uri));
-                }
-                sd_bus_message_exit_container(msg); /* a */
-                sd_bus_message_exit_container(msg); /* v */
-                sd_bus_message_exit_container(msg); /* e */
-
-                req->callback(req->user_data, (const char**)paths, n, false);
-                for (int i = 0; i < n; i++) free(paths[i]);
-                free(paths);
-                goto cleanup;
-            } else {
-                // Skip unknown variant values
-                if (sd_bus_message_skip(msg, "v") < 0) {
-                    sd_bus_message_exit_container(msg); /* e */
-                    break;
-                }
-            }
-            sd_bus_message_exit_container(msg); /* e */
+        int n = 0;
+        char** paths = _siodlg_parse_response_uris(msg, &n);
+        if (paths) {
+            req->callback(req->user_data, (const char**)paths, n, false);
+            for (int i = 0; i < n; i++) free(paths[i]);
+            free(paths);
+            goto cleanup;
         }
-        sd_bus_message_exit_container(msg); /* a */
     }
 
 fail:
@@ -914,6 +934,297 @@ static void _siodlg_linux_pick_open(const siodlg_file_dialog_desc_t* desc,
     }
 }
 
+typedef struct {
+    void*                       user_data;
+    siodlg_file_save_callback_t callback;
+    char*                       src_path;  // strdup of the source path to move
+    sd_bus_slot*                response_slot;
+    sd_bus_slot*                call_slot;
+} _siodlg_move_req_t;
+
+static int _siodlg_move_response_cb(sd_bus_message* msg, void* userdata, sd_bus_error* err) {
+    (void)err;
+    _siodlg_move_req_t* req = (_siodlg_move_req_t*)userdata;
+
+    uint32_t response = 0;
+    if (sd_bus_message_read(msg, "u", &response) < 0) goto fail;
+
+    if (response != 0) {
+        req->callback(req->user_data, NULL, true);
+        goto cleanup;
+    }
+
+    {
+        int n = 0;
+        char** paths = _siodlg_parse_response_uris(msg, &n);
+        if (paths && n > 0) {
+            const char* dst_path = paths[0];
+            // Attempt rename first; fall back to copy+delete for cross-device moves.
+            bool moved = false;
+            if (rename(req->src_path, dst_path) == 0) {
+                moved = true;
+            } else if (errno == EXDEV) {
+                // Cross-device: copy then delete source.
+                FILE* src_f = fopen(req->src_path, "rb");
+                FILE* dst_f = src_f ? fopen(dst_path, "wb") : NULL;
+                if (src_f && dst_f) {
+                    char buf[65536];
+                    size_t nb;
+                    bool copy_ok = true;
+                    while ((nb = fread(buf, 1, sizeof(buf), src_f)) > 0) {
+                        if (fwrite(buf, 1, nb, dst_f) != nb) { copy_ok = false; break; }
+                    }
+                    if (copy_ok && !ferror(src_f)) {
+                        fclose(dst_f); dst_f = NULL;
+                        fclose(src_f); src_f = NULL;
+                        remove(req->src_path);
+                        moved = true;
+                    }
+                }
+                if (src_f) fclose(src_f);
+                if (dst_f) fclose(dst_f);
+            }
+            req->callback(req->user_data, moved ? dst_path : NULL, !moved);
+            for (int i = 0; i < n; i++) free(paths[i]);
+            free(paths);
+            goto cleanup;
+        }
+        if (paths) {
+            for (int i = 0; i < n; i++) free(paths[i]);
+            free(paths);
+        }
+    }
+
+fail:
+    req->callback(req->user_data, NULL, true);
+cleanup:
+    if (req->response_slot) sd_bus_slot_unref(req->response_slot);
+    if (req->call_slot)     sd_bus_slot_unref(req->call_slot);
+    free(req->src_path);
+    free(req);
+    return 1;
+}
+
+static int _siodlg_move_call_returned_cb(sd_bus_message* msg, void* userdata, sd_bus_error* err) {
+    (void)err;
+    _siodlg_move_req_t* req = (_siodlg_move_req_t*)userdata;
+    if (sd_bus_message_is_method_error(msg, NULL)) {
+        const sd_bus_error* e = sd_bus_message_get_error(msg);
+        fprintf(stderr, "saext: portal SaveFile call failed: %s\n", e && e->message ? e->message : "(unknown)");
+        req->callback(req->user_data, NULL, true);
+        if (req->response_slot) sd_bus_slot_unref(req->response_slot);
+        if (req->call_slot)     sd_bus_slot_unref(req->call_slot);
+        free(req->src_path);
+        free(req);
+    }
+    return 1;
+}
+
+static void _siodlg_linux_pick_move(const siodlg_file_dialog_desc_t* desc,
+                                    const char* path,
+                                    void* user_data,
+                                    siodlg_file_save_callback_t callback)
+{
+    if (getenv("SAPP_FAKE_REQUEST_PATH")) {
+        const char* fake_uri = getenv("SAPP_FAKE_RESPONSE_URI");
+        const char* dst = fake_uri ? _siodlg_uri_to_path(fake_uri)
+                                   : (desc && desc->default_path ? desc->default_path : path);
+        callback(user_data, dst, false);
+        return;
+    }
+
+    if (_siodlg_ensure_bus() < 0) { callback(user_data, NULL, true); return; }
+
+    const char* unique_name = NULL;
+    if (sd_bus_get_unique_name(_siodlg_ctx.bus, &unique_name) < 0 || !unique_name) {
+        callback(user_data, NULL, true);
+        return;
+    }
+
+    char sender_clean[128];
+    {
+        int k = 0;
+        int i = (unique_name[0] == ':') ? 1 : 0;
+        for (; unique_name[i] && k < (int)(sizeof(sender_clean) - 1); i++) {
+            char c = unique_name[i];
+            sender_clean[k++] = (c == '.') ? '_' : c;
+        }
+        sender_clean[k] = '\0';
+    }
+
+    char token[64];
+    snprintf(token, sizeof(token), "siodlg_%u_%d",
+             ++_siodlg_ctx.token_counter, (int)getpid());
+
+    char request_path[512];
+    snprintf(request_path, sizeof(request_path),
+             "/org/freedesktop/portal/desktop/request/%s/%s",
+             sender_clean, token);
+
+    _siodlg_move_req_t* req = (_siodlg_move_req_t*)calloc(1, sizeof(*req));
+    req->user_data = user_data;
+    req->callback  = callback;
+    req->src_path  = strdup(path);
+
+    char match[768];
+    snprintf(match, sizeof(match),
+             "type='signal',"
+             "sender='org.freedesktop.portal.Desktop',"
+             "interface='org.freedesktop.portal.Request',"
+             "member='Response',"
+             "path='%s'", request_path);
+
+    if (sd_bus_add_match(_siodlg_ctx.bus, &req->response_slot, match,
+                         _siodlg_move_response_cb, req) < 0) {
+        fprintf(stderr, "saext: sd_bus_add_match failed (SaveFile)\n");
+        free(req->src_path);
+        free(req);
+        callback(user_data, NULL, true);
+        return;
+    }
+
+    sd_bus_message* m = NULL;
+    if (sd_bus_message_new_method_call(_siodlg_ctx.bus, &m,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.FileChooser",
+            "SaveFile") < 0) {
+        sd_bus_slot_unref(req->response_slot);
+        free(req->src_path);
+        free(req);
+        callback(user_data, NULL, true);
+        return;
+    }
+
+    // (ss) parent_window, title
+    const char* title = (desc && desc->message) ? desc->message : "Save";
+    sd_bus_message_append(m, "ss", "", title);
+
+    // Derive current_name and current_folder from desc->default_path / path.
+    // default_path semantics:
+    //   - existing file  -> current_name = basename(default_path),
+    //                       current_folder = dirname(default_path),
+    //                       current_file  = default_path
+    //   - directory      -> current_name = basename(path),
+    //                       current_folder = default_path
+    //   - not set / other -> current_name = basename(path),
+    //                        current_folder = dirname(path)
+    const char* current_name   = NULL;
+    const char* current_folder = NULL;
+    const char* current_file   = NULL;
+
+    char name_buf[4096]   = {0};
+    char folder_buf[4096] = {0};
+
+    const char* dp = (desc && desc->default_path && desc->default_path[0]) ? desc->default_path : NULL;
+
+    if (dp) {
+        struct stat st;
+        bool dp_exists = (stat(dp, &st) == 0);
+        bool dp_is_dir = dp_exists && S_ISDIR(st.st_mode);
+
+        if (dp_exists && !dp_is_dir) {
+            // default_path is a file
+            // current_name = basename(default_path)
+            strncpy(name_buf, dp, sizeof(name_buf) - 1);
+            current_name = basename(name_buf);
+            // current_folder = dirname(default_path)
+            strncpy(folder_buf, dp, sizeof(folder_buf) - 1);
+            current_folder = dirname(folder_buf);
+            // current_file = default_path (portal hint: "currently editing this file")
+            current_file = dp;
+        } else {
+            // default_path is a directory (or doesn't exist — treat as dir hint)
+            strncpy(name_buf, path, sizeof(name_buf) - 1);
+            current_name   = basename(name_buf);
+            current_folder = dp;
+        }
+    } else {
+        strncpy(name_buf, path, sizeof(name_buf) - 1);
+        current_name = basename(name_buf);
+        strncpy(folder_buf, path, sizeof(folder_buf) - 1);
+        current_folder = dirname(folder_buf);
+    }
+
+    // a{sv} options dict
+    sd_bus_message_open_container(m, 'a', "{sv}");
+    _siodlg_bus_append_str(m, "handle_token", token);
+    if (current_name && current_name[0])
+        _siodlg_bus_append_str(m, "current_name", current_name);
+    if (current_folder && current_folder[0])
+        _siodlg_bus_append_bytes(m, "current_folder", current_folder);
+    if (current_file && current_file[0])
+        _siodlg_bus_append_bytes(m, "current_file", current_file);
+    if (desc && desc->filters && desc->num_filters > 0) {
+        _siodlg_bus_append_filters(m, desc->filters, desc->num_filters);
+        if (desc->default_filter >= 0 && desc->default_filter < desc->num_filters)
+            _siodlg_bus_append_current_filter(m, &desc->filters[desc->default_filter]);
+    }
+    sd_bus_message_close_container(m); // a{sv}
+
+    int r = sd_bus_call_async(_siodlg_ctx.bus, &req->call_slot, m,
+                               _siodlg_move_call_returned_cb, req, 0);
+    sd_bus_message_unref(m);
+
+    if (r < 0) {
+        fprintf(stderr, "saext: sd_bus_call_async failed (SaveFile): %d (%s)\n", r, strerror(-r));
+        sd_bus_slot_unref(req->response_slot);
+        free(req->src_path);
+        free(req);
+        callback(user_data, NULL, true);
+    }
+}
+
+static void _siodlg_linux_share(const siodlg_share_desc_t* desc,
+                                 void* user_data,
+                                 siodlg_share_callback_t callback)
+{
+    if (!desc || desc->num_paths < 1) {
+        callback(user_data, "", true);
+        return;
+    }
+
+    if (_siodlg_ensure_bus() < 0) { callback(user_data, "", true); return; }
+
+    // Fire-and-forget: call OpenURI.OpenFile once per path, passing a read-only
+    // file descriptor.  The portal opens each file in its default application.
+    // We report success as soon as all calls are dispatched.
+    bool any_sent = false;
+    for (int i = 0; i < desc->num_paths; i++) {
+        const char* fpath = desc->paths[i];
+        if (!fpath || !fpath[0]) continue;
+
+        int fd = open(fpath, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+
+        sd_bus_message* m = NULL;
+        if (sd_bus_message_new_method_call(_siodlg_ctx.bus, &m,
+                "org.freedesktop.portal.Desktop",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.OpenURI",
+                "OpenFile") < 0) {
+            close(fd);
+            continue;
+        }
+
+        // (sh a{sv}) — parent_window, fd (unix fd), options
+        sd_bus_message_append(m, "sh", "", fd);
+        sd_bus_message_open_container(m, 'a', "{sv}");
+        sd_bus_message_close_container(m); // a{sv} (no options needed)
+
+        // Fire and forget — we don't need the response.
+        sd_bus_call_async(_siodlg_ctx.bus, NULL, m, NULL, NULL, 0);
+        sd_bus_message_unref(m);
+        close(fd);
+        any_sent = true;
+    }
+
+    if (any_sent)
+        callback(user_data, "opened", false);
+    else
+        callback(user_data, "", true);
+}
+
 #endif
 
 // ██████  ██    ██ ██████  ██      ██  ██████
@@ -976,6 +1287,7 @@ void siodlg_pick_move(const siodlg_file_dialog_desc_t* desc, const char* path, v
 #elif defined(_SIODLG_IOS)
     _siodlg_ios_pick_move(desc, path, user_data, callback);
 #elif defined(_SIODLG_LINUX)
+    _siodlg_linux_pick_move(desc, path, user_data, callback);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -988,6 +1300,7 @@ void siodlg_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_share
 #elif defined(_SIODLG_IOS)
     _siodlg_ios_share(desc, user_data, callback);
 #elif defined(_SIODLG_LINUX)
+    _siodlg_linux_share(desc, user_data, callback);
 #else
 #error "INVALID BACKEND"
 #endif
