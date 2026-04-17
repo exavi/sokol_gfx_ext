@@ -1,9 +1,9 @@
-#if defined(SOKOL_IMPL) && !defined(SOKOL_IO_DIALOGS_IMPL)
-#define SOKOL_IO_DIALOGS_IMPL
+#if defined(SOKOL_IMPL) && !defined(SIO_DIALOGS_IMPL)
+#define SIO_DIALOGS_IMPL
 #endif
-#ifndef SOKOL_IO_DIALOGS_INCLUDED
+#ifndef SIO_DIALOGS_INCLUDED
 /*
-    sokol_app_ext_fileio.h -- file I/O utilities extension
+    sio_dialogs.h -- file I/O utilities extension
 
     Provides file I/O utilities for simple apps (plays well with sokol_app).
 
@@ -11,11 +11,14 @@
 
     Do this:
         #define SOKOL_IMPL or
-        #define SOKOL_IO_DIALOGS_IMPL
+        #define SIO_DIALOGS_IMPL
     before you include this file in *one* C or C++ file to create the
     implementation.
+
+    There is a testing utility for linux left in, set SIODLG_FAKE_REQUEST_PATH 
+    as an environment variable to have the open dialog return that path.
 */
-#define SOKOL_IO_DIALOGS_INCLUDED (1)
+#define SIO_DIALOGS_INCLUDED (1)
 
 #if defined(__APPLE__)
     #include "TargetConditionals.h"
@@ -74,7 +77,7 @@ void siodlg_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_share
 } // extern "C"
 #endif
 
-#endif // SOKOL_IO_DIALOGS_INCLUDED
+#endif // SIO_DIALOGS_INCLUDED
 
 // ██ ███    ███ ██████  ██      ███████ ███    ███ ███████ ███    ██ ████████  █████  ████████ ██  ██████  ███    ██
 // ██ ████  ████ ██   ██ ██      ██      ████  ████ ██      ████   ██    ██    ██   ██    ██    ██ ██    ██ ████   ██
@@ -83,8 +86,8 @@ void siodlg_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_share
 // ██ ██      ██ ██      ███████ ███████ ██      ██ ███████ ██   ████    ██    ██   ██    ██    ██  ██████  ██   ████
 //
 // >>implementation
-#ifdef SOKOL_IO_DIALOGS_IMPL
-#define SOKOL_IO_DIALOGS_IMPL_INCLUDED (1)
+#ifdef SIO_DIALOGS_IMPL
+#define SIO_DIALOGS_IMPL_INCLUDED (1)
 
 #if defined(_SIODLG_MACOS) || defined(_SIODLG_IOS)
 
@@ -124,7 +127,7 @@ NSMutableArray<UTType*>* _siodlg_apple_dialog_types(const siodlg_file_filter_t* 
     return types;
 }
 
-#endif // _SIODLG_APPLE
+#endif // _SIODLG_MACOS || _SIODLG_IOS
 
 #if defined(_SIODLG_MACOS)
 
@@ -165,7 +168,6 @@ void _siodlg_macos_pick_open(const siodlg_file_dialog_desc_t* desc, void* user_d
                 paths[i] = strdup(urls[i].path.UTF8String);
             }
 
-            // callback with the file paths
             callback(user_data, paths, num_paths, false);
 
             for (int i = 0; i < num_paths; i++) {
@@ -488,7 +490,6 @@ void _siodlg_ios_pick_open(const siodlg_file_dialog_desc_t* desc, void* user_dat
                 paths[i] = strdup(pickedURLs[i].path.UTF8String);
             }
 
-            // callback with the file paths
             callback(user_data, paths, num_paths, false);
 
             for (int i = 0; i < num_paths; i++) {
@@ -638,7 +639,7 @@ static int _siodlg_ensure_bus(void) {
     sd_bus* b = NULL;
     int r = sd_bus_open_user(&b);
     if (r < 0) {
-        fprintf(stderr, "saext: sd_bus_open_user failed: %d (%s)\n", r, strerror(-r));
+        fprintf(stderr, "siodlg: sd_bus_open_user failed: %d (%s)\n", r, strerror(-r));
         return r;
     }
     _siodlg_ctx.bus = b;
@@ -830,7 +831,7 @@ static int _siodlg_call_returned_cb(sd_bus_message* msg, void* userdata, sd_bus_
     _siodlg_req_t* req = (_siodlg_req_t*)userdata;
     if (sd_bus_message_is_method_error(msg, NULL)) {
         const sd_bus_error* e = sd_bus_message_get_error(msg);
-        fprintf(stderr, "saext: portal call failed: %s\n", e && e->message ? e->message : "(unknown)");
+        fprintf(stderr, "siodlg: portal call failed: %s\n", e && e->message ? e->message : "(unknown)");
         req->callback(req->user_data, NULL, 0, true);
         if (req->response_slot) sd_bus_slot_unref(req->response_slot);
         if (req->call_slot)     sd_bus_slot_unref(req->call_slot);
@@ -906,7 +907,7 @@ static void _siodlg_linux_pick_open(const siodlg_file_dialog_desc_t* desc,
 
     if (sd_bus_add_match(_siodlg_ctx.bus, &req->response_slot, match,
                          _siodlg_response_cb, req) < 0) {
-        fprintf(stderr, "saext: sd_bus_add_match failed\n");
+        fprintf(stderr, "siodlg: sd_bus_add_match failed\n");
         free(req);
         callback(user_data, NULL, 0, true);
         return;
@@ -951,7 +952,7 @@ static void _siodlg_linux_pick_open(const siodlg_file_dialog_desc_t* desc,
     sd_bus_message_unref(m);
 
     if (r < 0) {
-        fprintf(stderr, "saext: sd_bus_call_async failed: %d (%s)\n", r, strerror(-r));
+        fprintf(stderr, "siodlg: sd_bus_call_async failed: %d (%s)\n", r, strerror(-r));
         sd_bus_slot_unref(req->response_slot);
         free(req);
         callback(user_data, NULL, 0, true);
@@ -1034,7 +1035,7 @@ static int _siodlg_move_call_returned_cb(sd_bus_message* msg, void* userdata, sd
     _siodlg_move_req_t* req = (_siodlg_move_req_t*)userdata;
     if (sd_bus_message_is_method_error(msg, NULL)) {
         const sd_bus_error* e = sd_bus_message_get_error(msg);
-        fprintf(stderr, "saext: portal SaveFile call failed: %s\n", e && e->message ? e->message : "(unknown)");
+        fprintf(stderr, "siodlg: portal SaveFile call failed: %s\n", e && e->message ? e->message : "(unknown)");
         req->callback(req->user_data, NULL, true);
         if (req->response_slot) sd_bus_slot_unref(req->response_slot);
         if (req->call_slot)     sd_bus_slot_unref(req->call_slot);
@@ -1100,7 +1101,7 @@ static void _siodlg_linux_pick_move(const siodlg_file_dialog_desc_t* desc,
 
     if (sd_bus_add_match(_siodlg_ctx.bus, &req->response_slot, match,
                          _siodlg_move_response_cb, req) < 0) {
-        fprintf(stderr, "saext: sd_bus_add_match failed (SaveFile)\n");
+        fprintf(stderr, "siodlg: sd_bus_add_match failed (SaveFile)\n");
         free(req->src_path);
         free(req);
         callback(user_data, NULL, true);
@@ -1191,7 +1192,7 @@ static void _siodlg_linux_pick_move(const siodlg_file_dialog_desc_t* desc,
     sd_bus_message_unref(m);
 
     if (r < 0) {
-        fprintf(stderr, "saext: sd_bus_call_async failed (SaveFile): %d (%s)\n", r, strerror(-r));
+        fprintf(stderr, "siodlg: sd_bus_call_async failed (SaveFile): %d (%s)\n", r, strerror(-r));
         sd_bus_slot_unref(req->response_slot);
         free(req->src_path);
         free(req);
@@ -1689,4 +1690,4 @@ void siodlg_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_share
 } // extern "C"
 #endif
 
-#endif // SOKOL_IO_DIALOGS_IMPL
+#endif // SIO_DIALOGS_IMPL
