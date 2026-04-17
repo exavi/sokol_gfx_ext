@@ -5,7 +5,9 @@
 /*
     sokol_app_ext_fileio.h -- file I/O utilities extension
 
-    Provides file I/O utilities for sokol_app.
+    Provides file I/O utilities for simple apps (plays well with sokol_app).
+
+    (sokol_app.h is not a strict requirement for this extension)
 
     Do this:
         #define SOKOL_IMPL or
@@ -15,21 +17,17 @@
 */
 #define SOKOL_IO_DIALOGS_INCLUDED (1)
 
-#if !defined(SOKOL_APP_INCLUDED)
-#error "Please include sokol_app.h before sokol_app_ext_fileio.h"
-#endif
-
 #if defined(__APPLE__)
-#include "TargetConditionals.h"
+    #include "TargetConditionals.h"
     #if TARGET_OS_IPHONE
-#define _SIODLG_IOS
-#elif TARGET_OS_MAC
-#define _SIODLG_MACOS
+        #define _SIODLG_IOS
+    #elif TARGET_OS_MAC
+        #define _SIODLG_MACOS
     #endif
 #elif defined(__linux__)
-#define _SIODLG_LINUX
+    #define _SIODLG_LINUX
 #elif defined(_WIN32)
-#define _SIODLG_WINDOWS
+    #define _SIODLG_WINDOWS
 #endif
 
 #ifdef __cplusplus
@@ -64,13 +62,13 @@ struct siodlg_share_desc_t {
     void* parent;             // platform-specific parent window handle (e.g. NSView* on macOS/iOS, HWND on Windows)
 };
 
-SOKOL_APP_API_DECL void siodlg_setup(void);
-SOKOL_APP_API_DECL void siodlg_shutdown(void);
-SOKOL_APP_API_DECL void siodlg_process(void);
+void siodlg_setup(void);
+void siodlg_shutdown(void);
+void siodlg_process(void);
 
-SOKOL_APP_API_DECL void siodlg_pick_open(const siodlg_file_dialog_desc_t* desc, void* user_data, siodlg_file_open_callback_t callback);
-SOKOL_APP_API_DECL void siodlg_pick_move(const siodlg_file_dialog_desc_t* desc, const char* path, void* user_data, siodlg_file_save_callback_t callback);
-SOKOL_APP_API_DECL void siodlg_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_share_callback_t callback);
+void siodlg_pick_open(const siodlg_file_dialog_desc_t* desc, void* user_data, siodlg_file_open_callback_t callback);
+void siodlg_pick_move(const siodlg_file_dialog_desc_t* desc, const char* path, void* user_data, siodlg_file_save_callback_t callback);
+void siodlg_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_share_callback_t callback);
 
 #ifdef __cplusplus
 } // extern "C"
@@ -88,13 +86,21 @@ SOKOL_APP_API_DECL void siodlg_share(const siodlg_share_desc_t* desc, void* user
 #ifdef SOKOL_IO_DIALOGS_IMPL
 #define SOKOL_IO_DIALOGS_IMPL_INCLUDED (1)
 
-#ifndef SOKOL_APP_IMPL_INCLUDED
-#error "Please include sokol_app implementation before sokol_app_ext_fileio.h implementation"
-#endif
-
-#if defined(_SAPP_APPLE)
+#if defined(_SIODLG_MACOS) || defined(_SIODLG_IOS)
 
 #include <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+/* When compiling as Objective-C or Objective-C++ include the platform UI headers
+   so types like NSOpenPanel / NSSavePanel / UIDocumentPickerViewController are
+   visible. The containing project builds this TU as Objective-C++ so __OBJC__
+   will be defined in that case. */
+#ifdef __OBJC__
+#if defined(_SIODLG_MACOS)
+#import <Cocoa/Cocoa.h>
+#elif defined(_SIODLG_IOS)
+#import <UIKit/UIKit.h>
+#endif
+#endif
 
 NSMutableArray<UTType*>* _siodlg_apple_dialog_types(const siodlg_file_filter_t* filters, int num_filters) {
     NSMutableArray<UTType*>* types = [NSMutableArray arrayWithCapacity:num_filters];
@@ -118,9 +124,9 @@ NSMutableArray<UTType*>* _siodlg_apple_dialog_types(const siodlg_file_filter_t* 
     return types;
 }
 
-#endif // _SAPP_APPLE
+#endif // _SIODLG_APPLE
 
-#if defined(_SAPP_MACOS)
+#if defined(_SIODLG_MACOS)
 
 void _siodlg_macos_pick_open(const siodlg_file_dialog_desc_t* desc, void* user_data, siodlg_file_open_callback_t callback)
 {
@@ -306,7 +312,7 @@ void _siodlg_macos_share(const siodlg_share_desc_t* desc, void* user_data, siodl
         [picker showRelativeToRect:CGRectZero ofView:((NSViewController*)presenter).view preferredEdge:NSRectEdgeMinY];
 }
 
-#elif defined(_SAPP_IOS)
+#elif defined(_SIODLG_IOS)
 
 @interface UIView (FindUIViewController)
 
@@ -586,7 +592,7 @@ void _siodlg_ios_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_
     [presentingViewController presentViewController:activityViewController animated:YES completion:nil];
 }
 
-#elif defined(_SAPP_LINUX)
+#elif defined(_SIODLG_LINUX)
 // XDG Desktop Portal via sd-bus.
 // Requires linking against systemd (e.g. -lsystemd) and including the systemd header paths (e.g. -I/usr/include/systemd).
 
