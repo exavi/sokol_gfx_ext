@@ -1225,6 +1225,355 @@ static void _siodlg_linux_share(const siodlg_share_desc_t* desc,
         callback(user_data, "", true);
 }
 
+#elif defined(_SIODLG_WINDOWS)
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <shobjidl_core.h>
+#include <shlobj.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Convert a UTF-8 string to a newly-allocated wide string.
+// Caller must free() the result.
+static wchar_t* _siodlg_utf8_to_wide(const char* utf8) {
+    if (!utf8) return NULL;
+    int len = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (len <= 0) return NULL;
+    wchar_t* wide = (wchar_t*)malloc(len * sizeof(wchar_t));
+    if (!wide) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, len);
+    return wide;
+}
+
+// Convert a wide string to a newly-allocated UTF-8 string.
+// Caller must free() the result.
+static char* _siodlg_wide_to_utf8(const wchar_t* wide) {
+    if (!wide) return NULL;
+    int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
+    if (len <= 0) return NULL;
+    char* utf8 = (char*)malloc(len);
+    if (!utf8) return NULL;
+    WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, len, NULL, NULL);
+    return utf8;
+}
+
+// Build a COMDLG_FILTERSPEC array from the sokol filter descriptors.
+// Each entry produces one spec: description + semicolon-separated glob list ("*.usd;*.usda").
+// Returns the number of specs written. Caller must free via _siodlg_free_filter_specs.
+static int _siodlg_build_filter_specs(const siodlg_file_filter_t* filters, int num_filters,
+                                       COMDLG_FILTERSPEC* out_specs) {
+    int count = 0;
+    for (int i = 0; i < num_filters; i++) {
+        const siodlg_file_filter_t* f = &filters[i];
+
+        // Build semicolon-separated glob pattern: "*.ext1;*.ext2"
+        size_t total = 1; // for NUL
+        for (int j = 0; j < f->num_extensions; j++) {
+            const char* ext = f->extensions[j];
+            total += 2 + strlen(ext) + 1; // "*." + ext + ";"
+        }
+        if (f->num_extensions == 0) total += 3; // "*.*"
+
+        char* pattern_utf8 = (char*)malloc(total);
+        if (!pattern_utf8) continue;
+        pattern_utf8[0] = '\0';
+        if (f->num_extensions == 0) {
+            strcpy(pattern_utf8, "*.*");
+        } else {
+            for (int j = 0; j < f->num_extensions; j++) {
+                const char* ext = f->extensions[j];
+                if (ext[0] == '.') {
+                    strcat(pattern_utf8, "*");
+                    strcat(pattern_utf8, ext);
+                } else {
+                    strcat(pattern_utf8, "*.");
+                    strcat(pattern_utf8, ext);
+                }
+                if (j < f->num_extensions - 1)
+                    strcat(pattern_utf8, ";");
+            }
+        }
+
+        wchar_t* pattern_wide = _siodlg_utf8_to_wide(pattern_utf8);
+        free(pattern_utf8);
+        if (!pattern_wide) continue;
+
+        wchar_t* name_wide = _siodlg_utf8_to_wide(f->description ? f->description : "All Files");
+        if (!name_wide) { free(pattern_wide); continue; }
+
+        out_specs[count].pszName = name_wide;
+        out_specs[count].pszSpec = pattern_wide;
+        count++;
+    }
+    return count;
+}
+
+static void _siodlg_free_filter_specs(COMDLG_FILTERSPEC* specs, int count) {
+    for (int i = 0; i < count; i++) {
+        free((void*)specs[i].pszName);
+        free((void*)specs[i].pszSpec);
+    }
+}
+
+// Helper: set folder on a dialog from a path string (handles both file and directory paths).
+static void _siodlg_set_dialog_folder(IFileDialog* dlg, const char* path) {
+    wchar_t* wpath = _siodlg_utf8_to_wide(path);
+    if (!wpath) return;
+    IShellItem* item = NULL;
+    if (SUCCEEDED(SHCreateItemFromParsingName(wpath, NULL, IID_IShellItem, (void**)&item))) {
+        SFGAOF attrs = 0;
+        item->GetAttributes(SFGAO_FOLDER, &attrs);
+        if (attrs & SFGAO_FOLDER) {
+            dlg->SetFolder(item);
+        } else {
+            IShellItem* parent = NULL;
+            if (SUCCEEDED(item->GetParent(&parent))) {
+                dlg->SetFolder(parent);
+                parent->Release();
+            }
+        }
+        item->Release();
+    }
+    free(wpath);
+}
+
+static void _siodlg_windows_pick_open(const siodlg_file_dialog_desc_t* desc,
+                                       void* user_data,
+                                       siodlg_file_open_callback_t callback)
+{
+    HWND hwnd = (HWND)desc->parent;
+
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+    IFileOpenDialog* pfd = NULL;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_ALL,
+                                  IID_IFileOpenDialog, (void**)&pfd);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        callback(user_data, NULL, 0, true);
+        return;
+    }
+
+    // Apply options
+    DWORD opts = 0;
+    pfd->GetOptions(&opts);
+    opts |= FOS_FORCEFILESYSTEM;
+    if (desc && desc->pick_directories) opts |= FOS_PICKFOLDERS;
+    if (desc && desc->multiple)         opts |= FOS_ALLOWMULTISELECT;
+    pfd->SetOptions(opts);
+
+    // Title
+    if (desc && desc->message) {
+        wchar_t* title = _siodlg_utf8_to_wide(desc->message);
+        if (title) { pfd->SetTitle(title); free(title); }
+    }
+
+    // Default folder
+    if (desc && desc->default_path && desc->default_path[0])
+        _siodlg_set_dialog_folder(pfd, desc->default_path);
+
+    // File type filters
+    if (desc && desc->filters && desc->num_filters > 0) {
+        COMDLG_FILTERSPEC* specs = (COMDLG_FILTERSPEC*)malloc(desc->num_filters * sizeof(COMDLG_FILTERSPEC));
+        if (specs) {
+            int count = _siodlg_build_filter_specs(desc->filters, desc->num_filters, specs);
+            if (count > 0) {
+                pfd->SetFileTypes((UINT)count, specs);
+                int def = (desc->default_filter >= 0 && desc->default_filter < count)
+                          ? desc->default_filter : 0;
+                pfd->SetFileTypeIndex((UINT)(def + 1)); // 1-based
+            }
+            _siodlg_free_filter_specs(specs, count);
+            free(specs);
+        }
+    }
+
+    hr = pfd->Show(hwnd);
+    if (SUCCEEDED(hr)) {
+        IShellItemArray* items = NULL;
+        if (SUCCEEDED(pfd->GetResults(&items))) {
+            DWORD count = 0;
+            items->GetCount(&count);
+            const char** paths = (const char**)malloc(count * sizeof(char*));
+            DWORD actual = 0;
+            for (DWORD i = 0; i < count; i++) {
+                IShellItem* item = NULL;
+                if (SUCCEEDED(items->GetItemAt(i, &item))) {
+                    LPWSTR wpath = NULL;
+                    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wpath))) {
+                        char* utf8 = _siodlg_wide_to_utf8(wpath);
+                        CoTaskMemFree(wpath);
+                        if (utf8) paths[actual++] = utf8;
+                    }
+                    item->Release();
+                }
+            }
+            callback(user_data, paths, (int)actual, false);
+            for (DWORD i = 0; i < actual; i++) free((void*)paths[i]);
+            free(paths);
+            items->Release();
+        } else {
+            callback(user_data, NULL, 0, true);
+        }
+    } else {
+        callback(user_data, NULL, 0, true);
+    }
+
+    pfd->Release();
+    CoUninitialize();
+}
+
+static void _siodlg_windows_pick_move(const siodlg_file_dialog_desc_t* desc,
+                                       const char* path,
+                                       void* user_data,
+                                       siodlg_file_save_callback_t callback)
+{
+    HWND hwnd = (HWND)desc->parent;
+
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+    IFileSaveDialog* pfd = NULL;
+    HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, NULL, CLSCTX_ALL,
+                                  IID_IFileSaveDialog, (void**)&pfd);
+    if (FAILED(hr)) {
+        CoUninitialize();
+        callback(user_data, NULL, true);
+        return;
+    }
+
+    // Options
+    DWORD opts = 0;
+    pfd->GetOptions(&opts);
+    opts |= FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT;
+    pfd->SetOptions(opts);
+
+    // Title
+    if (desc && desc->message) {
+        wchar_t* title = _siodlg_utf8_to_wide(desc->message);
+        if (title) { pfd->SetTitle(title); free(title); }
+    }
+
+    // Default folder
+    if (desc && desc->default_path && desc->default_path[0])
+        _siodlg_set_dialog_folder(pfd, desc->default_path);
+
+    // Pre-fill filename from the source path's basename
+    if (path) {
+        wchar_t* wsrc = _siodlg_utf8_to_wide(path);
+        if (wsrc) {
+            wchar_t* basename = wsrc;
+            for (wchar_t* p = wsrc; *p; p++) {
+                if (*p == L'\\' || *p == L'/') basename = p + 1;
+            }
+            pfd->SetFileName(basename);
+            free(wsrc);
+        }
+    }
+
+    // File type filters
+    if (desc && desc->filters && desc->num_filters > 0) {
+        COMDLG_FILTERSPEC* specs = (COMDLG_FILTERSPEC*)malloc(desc->num_filters * sizeof(COMDLG_FILTERSPEC));
+        if (specs) {
+            int count = _siodlg_build_filter_specs(desc->filters, desc->num_filters, specs);
+            if (count > 0) {
+                pfd->SetFileTypes((UINT)count, specs);
+                int def = (desc->default_filter >= 0 && desc->default_filter < count)
+                          ? desc->default_filter : 0;
+                pfd->SetFileTypeIndex((UINT)(def + 1));
+            }
+            _siodlg_free_filter_specs(specs, count);
+            free(specs);
+        }
+    }
+
+    hr = pfd->Show(hwnd);
+    if (SUCCEEDED(hr)) {
+        IShellItem* item = NULL;
+        if (SUCCEEDED(pfd->GetResult(&item))) {
+            LPWSTR wdest = NULL;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wdest))) {
+                wchar_t* wsrc = _siodlg_utf8_to_wide(path);
+                if (wsrc && MoveFileExW(wsrc, wdest, MOVEFILE_REPLACE_EXISTING)) {
+                    char* dest_utf8 = _siodlg_wide_to_utf8(wdest);
+                    callback(user_data, dest_utf8, false);
+                    free(dest_utf8);
+                } else {
+                    callback(user_data, NULL, true);
+                }
+                free(wsrc);
+                CoTaskMemFree(wdest);
+            } else {
+                callback(user_data, NULL, true);
+            }
+            item->Release();
+        } else {
+            callback(user_data, NULL, true);
+        }
+    } else {
+        callback(user_data, NULL, true);
+    }
+
+    pfd->Release();
+    CoUninitialize();
+}
+
+static void _siodlg_windows_share(const siodlg_share_desc_t* desc,
+                                   void* user_data,
+                                   siodlg_share_callback_t callback)
+{
+    if (!desc || desc->num_paths < 1) {
+        callback(user_data, "", true);
+        return;
+    }
+
+    // Open Explorer with the items highlighted.
+    // Use the first item's parent as the folder; pass all items as the selection.
+    int num_paths = desc->num_paths;
+    LPITEMIDLIST* child_pidls = (LPITEMIDLIST*)malloc(num_paths * sizeof(LPITEMIDLIST));
+    if (!child_pidls) { callback(user_data, "", true); return; }
+
+    LPITEMIDLIST folder_pidl = NULL;
+    int selected = 0;
+
+    for (int i = 0; i < num_paths; i++) {
+        wchar_t* wpath = _siodlg_utf8_to_wide(desc->paths[i]);
+        if (!wpath) continue;
+
+        LPITEMIDLIST full_pidl = ILCreateFromPathW(wpath);
+
+        if (full_pidl && !folder_pidl) {
+            // Build parent folder PIDL from the path string
+            wchar_t* dir = _siodlg_utf8_to_wide(desc->paths[i]);
+            if (dir) {
+                wchar_t* last_sep = NULL;
+                for (wchar_t* p = dir; *p; p++) {
+                    if (*p == L'\\' || *p == L'/') last_sep = p;
+                }
+                if (last_sep) *last_sep = L'\0';
+                folder_pidl = ILCreateFromPathW(dir);
+                free(dir);
+            }
+        }
+
+        free(wpath);
+        if (full_pidl) child_pidls[selected++] = full_pidl;
+    }
+
+    if (folder_pidl && selected > 0) {
+        SHOpenFolderAndSelectItems(folder_pidl, (UINT)selected,
+                                   (LPCITEMIDLIST*)child_pidls, 0);
+    }
+
+    for (int i = 0; i < selected; i++) ILFree(child_pidls[i]);
+    free(child_pidls);
+    if (folder_pidl) ILFree(folder_pidl);
+
+    callback(user_data, "", false);
+}
+
 #endif
 
 // ██████  ██    ██ ██████  ██      ██  ██████
@@ -1275,6 +1624,8 @@ void siodlg_pick_open(const siodlg_file_dialog_desc_t* desc, void* user_data, si
     _siodlg_ios_pick_open(desc, user_data, callback);
 #elif defined(_SIODLG_LINUX)
     _siodlg_linux_pick_open(desc, user_data, callback);
+#elif defined(_SIODLG_WINDOWS)
+    _siodlg_windows_pick_open(desc, user_data, callback);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -1288,6 +1639,8 @@ void siodlg_pick_move(const siodlg_file_dialog_desc_t* desc, const char* path, v
     _siodlg_ios_pick_move(desc, path, user_data, callback);
 #elif defined(_SIODLG_LINUX)
     _siodlg_linux_pick_move(desc, path, user_data, callback);
+#elif defined(_SIODLG_WINDOWS)
+    _siodlg_windows_pick_move(desc, path, user_data, callback);
 #else
 #error "INVALID BACKEND"
 #endif
@@ -1301,6 +1654,8 @@ void siodlg_share(const siodlg_share_desc_t* desc, void* user_data, siodlg_share
     _siodlg_ios_share(desc, user_data, callback);
 #elif defined(_SIODLG_LINUX)
     _siodlg_linux_share(desc, user_data, callback);
+#elif defined(_SIODLG_WINDOWS)
+    _siodlg_windows_share(desc, user_data, callback);
 #else
 #error "INVALID BACKEND"
 #endif
