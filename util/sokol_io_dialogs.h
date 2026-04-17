@@ -500,7 +500,18 @@ void _siodlg_ios_pick_open(const siodlg_file_dialog_desc_t* desc, void* user_dat
         }
     };
 
-    [[UIApplication sharedApplication].topMostViewController presentViewController:picker animated:YES completion:nil];
+    NSObject* parent = (__bridge NSObject*)desc->parent;
+
+    UIViewController* presenterVC = nil;
+    if ([parent isKindOfClass:[UIWindow class]])
+        presenterVC = ((UIWindow*)parent).rootViewController;
+    else if ([parent isKindOfClass:[UIViewController class]])
+        presenterVC = (UIViewController*)desc->parent;
+
+    if (!presenterVC)
+        presenterVC = [[UIApplication sharedApplication] topMostViewController];
+
+    [presenterVC presentViewController:picker animated:YES completion:nil];
 }
 
 bool _siodlg_ios_pick_move(const siodlg_file_dialog_desc_t* desc, const char* path, void* user_data, siodlg_file_save_callback_t callback)
@@ -523,7 +534,14 @@ bool _siodlg_ios_pick_move(const siodlg_file_dialog_desc_t* desc, const char* pa
         callback(user_data, urls.firstObject.path.UTF8String, false);
     };
 
-    UIViewController* presenterVC = (__bridge UIViewController*)desc->parent;
+    NSObject* parent = (__bridge NSObject*)desc->parent;
+
+    UIViewController* presenterVC = nil;
+    if ([parent isKindOfClass:[UIWindow class]])
+        presenterVC = ((UIWindow*)parent).rootViewController;
+    else if ([parent isKindOfClass:[UIViewController class]])
+        presenterVC = (UIViewController*)desc->parent;
+
     if (!presenterVC)
         presenterVC = [[UIApplication sharedApplication] topMostViewController];
 
