@@ -845,8 +845,8 @@ static void _siodlg_linux_pick_open(const siodlg_file_dialog_desc_t* desc,
                                     siodlg_file_open_callback_t callback)
 {
     // Testing escape hatch: bypass portal entirely
-    if (getenv("SAPP_FAKE_REQUEST_PATH")) {
-        const char* fake_uri = getenv("SAPP_FAKE_RESPONSE_URI");
+    if (getenv("SIODLG_FAKE_REQUEST_PATH")) {
+        const char* fake_uri = getenv("SIODLG_FAKE_RESPONSE_URI");
         const char* path = fake_uri ? _siodlg_uri_to_path(fake_uri)
                                     : (desc && desc->default_path ? desc->default_path
                                                                    : "/tmp/example.txt");
@@ -1049,8 +1049,8 @@ static void _siodlg_linux_pick_move(const siodlg_file_dialog_desc_t* desc,
                                     void* user_data,
                                     siodlg_file_save_callback_t callback)
 {
-    if (getenv("SAPP_FAKE_REQUEST_PATH")) {
-        const char* fake_uri = getenv("SAPP_FAKE_RESPONSE_URI");
+    if (getenv("SIODLG_FAKE_REQUEST_PATH")) {
+        const char* fake_uri = getenv("SIODLG_FAKE_RESPONSE_URI");
         const char* dst = fake_uri ? _siodlg_uri_to_path(fake_uri)
                                    : (desc && desc->default_path ? desc->default_path : path);
         callback(user_data, dst, false);
