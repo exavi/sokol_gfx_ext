@@ -329,6 +329,11 @@ static void _sgext_gl_teximage_read_mode_type_format(sg_pixel_format fmt, GLenum
             format = GL_BGRA;
             type = GL_UNSIGNED_BYTE;
             break;
+        case SG_PIXELFORMAT_RGBA16F:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_RGBA;
+            type = GL_HALF_FLOAT;
+            break;
         case SG_PIXELFORMAT_RGBA32F:
             mode = GL_COLOR_ATTACHMENT0;
             format = GL_RGBA;
@@ -373,6 +378,8 @@ static void _sgext_gl_transfer_begin_readback(_sgext_transfer_buffer* buf)
     _sgext_gl_teximage_read_mode_type_format(img->cmn.pixel_format, mode, format, type);
 
     glReadBuffer(mode);
+    // ensure tightly-packed rows for PBO readback
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, img->cmn.width, img->cmn.height, format, type, 0);
 
     if (buf->fences[buf->active_slot])
