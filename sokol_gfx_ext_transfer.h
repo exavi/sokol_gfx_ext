@@ -590,6 +590,16 @@ static void _sgext_mtl_transfer_copy(sgext_transfer_buffer buf_dst)
 
     id<MTLCommandBuffer> commandBuffer = _sg.mtl.cmd_buffer;
 
+    // sokol's command buffer is nil between sg_commit() and the next pass
+    // (e.g. back-to-back captures with no render pass in between) — encoding
+    // into it would silently drop the copy. Use a one-shot command buffer.
+    bool scoped_cmd_buffer = false;
+    if (commandBuffer == nil) {
+        id<MTLCommandQueue> cmd_queue = (__bridge id<MTLCommandQueue>)_sg.mtl.cmd_queue;
+        commandBuffer = [cmd_queue commandBuffer];
+        scoped_cmd_buffer = true;
+    }
+
     id<MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
 
     const _sg_image_t* img = buf->img;
@@ -612,6 +622,11 @@ static void _sgext_mtl_transfer_copy(sgext_transfer_buffer buf_dst)
         destinationBytesPerImage:img->cmn.width * img->cmn.height * format_info.bytes_per_pixel];
 
     [blitEncoder endEncoding];
+
+    if (scoped_cmd_buffer) {
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+    }
 
     buf->active_slot = (buf->active_slot + 1) % SG_NUM_INFLIGHT_FRAMES;
 }
