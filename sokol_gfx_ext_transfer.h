@@ -663,16 +663,11 @@ static void _sgext_mtl_copy_view_to_image(sg_view src_view, sg_image dst_image)
     [blitEncoder endEncoding];
 }
 
-static size_t _sgext_mtl_calc_offset(_sgext_transfer_buffer* buf, uint32_t x, uint32_t y, size_t size)
+static size_t _sgext_mtl_calc_offset(_sgext_transfer_buffer* buf, uint32_t x, uint32_t y)
 {
     const _sg_image_t* img = buf->img;
 
     sg_pixelformat_info format_info = sg_query_pixelformat(img->cmn.pixel_format);
-
-    // Flip y vertically (Metal texture coordinates)
-    // (if a single pixel is requested, or we can't guarantee OOB access)
-    if (size == (size_t)format_info.bytes_per_pixel)
-        y = img->cmn.height - y;
 
     return (y * img->cmn.width + x) * format_info.bytes_per_pixel;
 }
@@ -684,7 +679,7 @@ static void _sgext_mtl_transfer_read(sgext_transfer_buffer cap_buf, uint32_t x, 
 
     int active_slot = (buf->active_slot + 1) % SG_NUM_INFLIGHT_FRAMES; // get previous
 
-    size_t offset = _sgext_mtl_calc_offset(buf, x, y, size);
+    size_t offset = _sgext_mtl_calc_offset(buf, x, y);
 
     const _sg_buffer_t* raw_buf = _sg_lookup_buffer(buf->mtl_buf.id);
     id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)_sg_mtl_id(raw_buf->mtl.buf[active_slot]);
