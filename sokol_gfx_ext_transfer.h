@@ -821,6 +821,9 @@ static void _sgext_vk_transfer_copy(sgext_transfer_buffer buf_dst)
 
     _sg_image_t* img = (_sg_image_t*)buf->img;
 
+    // Re-acquire in case a prior sg_commit() cleared it
+    _sg_vk_acquire_frame_command_buffers();
+
     VkCommandBuffer cmd_buf = (VkCommandBuffer)_sg.vk.frame.cmd_buf;
     SOKOL_ASSERT(cmd_buf);
 
@@ -876,14 +879,15 @@ static void _sgext_vk_transfer_copy(sgext_transfer_buffer buf_dst)
     vkCmdCopyImageToBuffer(cmd_buf, src_image,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
 
-    // Barrier 2: transition back to COLOR_ATTACHMENT_OPTIMAL
+    // Barrier 2: transition back to whatever access the image was in before
+    // this capture.
     barriers[1].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     barriers[1].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
     barriers[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barriers[1].dstStageMask = _sg_vk_dst_stage_mask(_SG_VK_ACCESS_COLOR_ATTACHMENT);
-    barriers[1].dstAccessMask = _sg_vk_dst_access_mask(_SG_VK_ACCESS_COLOR_ATTACHMENT);
-    barriers[1].newLayout = _sg_vk_image_layout(_SG_VK_ACCESS_COLOR_ATTACHMENT);
+    barriers[1].dstStageMask = _sg_vk_dst_stage_mask(old_access);
+    barriers[1].dstAccessMask = _sg_vk_dst_access_mask(old_access);
+    barriers[1].newLayout = _sg_vk_image_layout(old_access);
     barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barriers[1].image = src_image;
@@ -898,7 +902,7 @@ static void _sgext_vk_transfer_copy(sgext_transfer_buffer buf_dst)
     vkCmdPipelineBarrier2(cmd_buf, &dep_info);
 
     // Update sokol's state tracking to match final layout
-    img->vk.cur_access = _SG_VK_ACCESS_COLOR_ATTACHMENT;
+    img->vk.cur_access = old_access;
 
     // No vkEndCommandBuffer, no vkQueueSubmit - sokol handles it in sg_commit()
     // Commands will be submitted when sg_commit() is called
@@ -999,6 +1003,9 @@ static void _sgext_vk_copy_view_to_image(sg_view src_view, sg_image dst_image)
     _sg_image_t* dst_img = (_sg_image_t*)_sg_lookup_image(dst_image.id);
     if (!dst_img) return;
 
+    // Re-acquire in case a prior sg_commit() cleared it
+    _sg_vk_acquire_frame_command_buffers();
+
     // Use sokol's command buffer uses _sg.mtl.cmd_buffer)
     VkCommandBuffer cmd_buf = (VkCommandBuffer)_sg.vk.frame.cmd_buf;
     SOKOL_ASSERT(cmd_buf);
@@ -1069,13 +1076,14 @@ static void _sgext_vk_copy_view_to_image(sg_view src_view, sg_image dst_image)
         (VkImage)dst_img->vk.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         1, &region);
 
-    // Transition both back (source to COLOR_ATTACHMENT, dest to TEXTURE)
+    // Transition both back — source to whatever access it had before this
+    // copy.
     barriers[0].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     barriers[0].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
     barriers[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barriers[0].dstStageMask = _sg_vk_dst_stage_mask(_SG_VK_ACCESS_COLOR_ATTACHMENT);
-    barriers[0].dstAccessMask = _sg_vk_dst_access_mask(_SG_VK_ACCESS_COLOR_ATTACHMENT);
-    barriers[0].newLayout = _sg_vk_image_layout(_SG_VK_ACCESS_COLOR_ATTACHMENT);
+    barriers[0].dstStageMask = _sg_vk_dst_stage_mask(src_old_access);
+    barriers[0].dstAccessMask = _sg_vk_dst_access_mask(src_old_access);
+    barriers[0].newLayout = _sg_vk_image_layout(src_old_access);
 
     barriers[1].srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     barriers[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -1089,7 +1097,7 @@ static void _sgext_vk_copy_view_to_image(sg_view src_view, sg_image dst_image)
     vkCmdPipelineBarrier2(cmd_buf, &dep_info);
 
     // Update sokol's state tracking to match final layouts
-    src_img->vk.cur_access = _SG_VK_ACCESS_COLOR_ATTACHMENT;
+    src_img->vk.cur_access = src_old_access;
     dst_img->vk.cur_access = _SG_VK_ACCESS_TEXTURE;
 }
 
