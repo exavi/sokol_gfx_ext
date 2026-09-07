@@ -12,8 +12,7 @@
     implementation.
 
     The following defines are used by the implementation to select the
-    platform-specific embedded shader code (these are the same defines as
-    used by sokol_gfx.h and sokol_app.h):
+    backend:
 
     SOKOL_METAL
 
