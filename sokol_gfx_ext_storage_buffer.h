@@ -15,6 +15,13 @@
     backend (same defines as sokol_gfx.h/sokol_app.h):
         #define SOKOL_GLCORE
         #define SOKOL_METAL
+        #define SOKOL_VULKAN
+
+    On Vulkan the binding goes through the normal sg_apply_bindings path
+    (sg_shader_desc.views[].storage_buffer with readonly=false); the
+    exavi/sokol fork allows a writable storage buffer view in a render pipeline
+    for Vulkan only as there seemed to be no other way to circumvent it.
+    Other backends are clean and don't require patching sokol_gfx.h
 */
 #define SOKOL_GFX_EXT_STORAGE_BUFFER_INCLUDED (1)
 
@@ -148,6 +155,58 @@ void _sgext_mtl_storage_buffer_copy_data(sg_buffer stg_buf, sgext_mutable_range 
 }
 
 
+#elif defined(SOKOL_VULKAN)
+
+sg_buffer _sgext_vk_make_storage_buffer(sg_buffer_desc* desc)
+{
+    desc->data.ptr = nullptr;
+    desc->data.size = 0;
+    return sg_make_buffer(desc);
+}
+
+void _sgext_vk_apply_storage_buffer_binding(sg_shader_stage stage, sg_buffer b, int slot)
+{
+    // exavi fork: Vulkan binds writable storage buffers through the normal
+    // sg_apply_bindings path (sg_shader_desc.views[].storage_buffer, readonly=false).
+    (void)stage; (void)b; (void)slot;
+}
+
+void _sgext_vk_storage_buffer_copy_data(sg_buffer stg_buf, sgext_mutable_range rg)
+{
+    _sg_buffer_t* buf = _sg_lookup_buffer(stg_buf.id);
+    SOKOL_ASSERT(buf && buf->vk.buf);
+    SOKOL_ASSERT(rg.size <= (size_t)_sg.vk.stage.copy.size);
+
+    VkCommandBuffer cmd_buf = _sg_vk_staging_copy_begin();
+
+    VkBufferMemoryBarrier to_src = {};
+    to_src.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    to_src.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+    to_src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    to_src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_src.buffer = buf->vk.buf;
+    to_src.offset = 0;
+    to_src.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd_buf,
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, 0, 1, &to_src, 0, 0);
+
+    VkBufferCopy region = {};
+    region.srcOffset = 0;
+    region.dstOffset = 0;
+    region.size = rg.size;
+    vkCmdCopyBuffer(cmd_buf, buf->vk.buf, _sg.vk.stage.copy.buf, 1, &region);
+
+    _sg_vk_staging_copy_end(cmd_buf, _sg.vk.queue);
+
+    void* mapped = 0;
+    VkResult res = vkMapMemory(_sg.vk.dev, _sg.vk.stage.copy.mem, 0, (VkDeviceSize)rg.size, 0, &mapped);
+    SOKOL_ASSERT((res == VK_SUCCESS) && mapped); (void)res;
+    memcpy(rg.ptr, mapped, rg.size);
+    vkUnmapMemory(_sg.vk.dev, _sg.vk.stage.copy.mem);
+}
+
 #else
 #error "Unsupported backend"
 #endif
@@ -158,6 +217,8 @@ sg_buffer sgext_make_storage_buffer(sg_buffer_desc* desc)
     return _sgext_gl_make_storage_buffer(desc);
 #elif defined(SOKOL_METAL)
     return _sgext_mtl_make_storage_buffer(desc);
+#elif defined(SOKOL_VULKAN)
+    return _sgext_vk_make_storage_buffer(desc);
 #else
 #error("INVALID BACKEND");
 #endif
@@ -174,6 +235,8 @@ void sgext_apply_storage_buffer_binding(sg_shader_stage stage, sg_buffer b, int 
     _sgext_gl_apply_storage_buffer_binding(stage, b, slot);
 #elif defined(SOKOL_METAL)
     _sgext_mtl_apply_storage_buffer_binding(stage, b, slot);
+#elif defined(SOKOL_VULKAN)
+    _sgext_vk_apply_storage_buffer_binding(stage, b, slot);
 #else
 #error("INVALID BACKEND");
 #endif
@@ -185,6 +248,8 @@ void sgext_storage_buffer_copy_data(sg_buffer buf, sgext_mutable_range rg)
     _sgext_gl_storage_buffer_copy_data(buf, rg);
 #elif defined(SOKOL_METAL)
     _sgext_mtl_storage_buffer_copy_data(buf, rg);
+#elif defined(SOKOL_VULKAN)
+    _sgext_vk_storage_buffer_copy_data(buf, rg);
 #else
 #error("INVALID BACKEND");
 #endif
