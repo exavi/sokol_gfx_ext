@@ -213,7 +213,12 @@ void _siodlg_macos_pick_move(const siodlg_file_dialog_desc_t* desc, const char* 
         if (result == NSModalResponseOK) {
             NSURL* url = panel.URL;
             if (url && url.path.length > 0) {
-                if ([[NSFileManager defaultManager] moveItemAtURL:srcURL toURL:url error:nil]) {
+                // user any overwrite; moveItem would fail on an existing destination.
+                NSFileManager* fm = [NSFileManager defaultManager];
+                BOOL moved = [fm fileExistsAtPath:url.path]
+                    ? [fm replaceItemAtURL:url withItemAtURL:srcURL backupItemName:nil options:0 resultingItemURL:nil error:nil]
+                    : [fm moveItemAtURL:srcURL toURL:url error:nil];
+                if (moved) {
                     callback(user_data, url.path.UTF8String, false);
                 } else {
                     callback(user_data, NULL, true);
@@ -1521,7 +1526,7 @@ static void _siodlg_windows_pick_move(const siodlg_file_dialog_desc_t* desc,
             LPWSTR wdest = NULL;
             if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &wdest))) {
                 wchar_t* wsrc = _siodlg_utf8_to_wide(path);
-                if (wsrc && MoveFileExW(wsrc, wdest, MOVEFILE_REPLACE_EXISTING)) {
+                if (wsrc && MoveFileExW(wsrc, wdest, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
                     char* dest_utf8 = _siodlg_wide_to_utf8(wdest);
                     callback(user_data, dest_utf8, false);
                     free(dest_utf8);
