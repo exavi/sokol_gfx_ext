@@ -344,6 +344,16 @@ static void _sgext_gl_teximage_read_mode_type_format(sg_pixel_format fmt, GLenum
             format = GL_RGBA;
             type = GL_FLOAT;
             break;
+        case SG_PIXELFORMAT_R8:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_RED;
+            type = GL_UNSIGNED_BYTE;
+            break;
+        case SG_PIXELFORMAT_R16F:
+            mode = GL_COLOR_ATTACHMENT0;
+            format = GL_RED;
+            type = GL_HALF_FLOAT;
+            break;
         case SG_PIXELFORMAT_R32F:
             mode = GL_COLOR_ATTACHMENT0;
             format = GL_RED;
