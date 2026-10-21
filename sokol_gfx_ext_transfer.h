@@ -860,6 +860,8 @@ static void _sgext_vk_transfer_copy(sgext_transfer_buffer buf_dst)
     VkBuffer staging = buf->staging_buffers[buf->active_slot];
 
     VkImage src_image = (VkImage)img->vk.img;
+    const VkImageAspectFlags aspect = _sg_is_depth_or_depth_stencil_format(img->cmn.pixel_format)
+        ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 
     // Manually transition to transfer src and back (sokol doesn't have transfer-read access type)
     // Using vkCmdPipelineBarrier2 to match sokol's barrier style
@@ -878,7 +880,7 @@ static void _sgext_vk_transfer_copy(sgext_transfer_buffer buf_dst)
     barriers[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barriers[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barriers[0].image = src_image;
-    barriers[0].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barriers[0].subresourceRange.aspectMask = aspect;
     barriers[0].subresourceRange.baseMipLevel = 0;
     barriers[0].subresourceRange.levelCount = 1;
     barriers[0].subresourceRange.baseArrayLayer = 0;
@@ -895,7 +897,7 @@ static void _sgext_vk_transfer_copy(sgext_transfer_buffer buf_dst)
     region.bufferOffset = 0;
     region.bufferRowLength = 0;
     region.bufferImageHeight = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.aspectMask = aspect;
     region.imageSubresource.mipLevel = 0;
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount = 1;
@@ -921,7 +923,7 @@ static void _sgext_vk_transfer_copy(sgext_transfer_buffer buf_dst)
     barriers[1].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barriers[1].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barriers[1].image = src_image;
-    barriers[1].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barriers[1].subresourceRange.aspectMask = aspect;
     barriers[1].subresourceRange.baseMipLevel = 0;
     barriers[1].subresourceRange.levelCount = 1;
     barriers[1].subresourceRange.baseArrayLayer = 0;
