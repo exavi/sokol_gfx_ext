@@ -590,6 +590,13 @@ static sgext_transfer_buffer _sgext_mtl_make_transfer_buffer(const sgext_transfe
     sg_pixelformat_info format_info = sg_query_pixelformat(img->cmn.pixel_format);
     buf_desc.size = img->cmn.width * img->cmn.height * format_info.bytes_per_pixel;
 
+    // injected buffers: sokol's stream usage makes them write-combined (slow CPU reads)
+    id<MTLBuffer> cached[SG_NUM_INFLIGHT_FRAMES];
+    for (int i = 0; i < SG_NUM_INFLIGHT_FRAMES; i++) {
+        cached[i] = [_sg.mtl.device newBufferWithLength:buf_desc.size
+                                                options:MTLResourceStorageModeShared];
+        buf_desc.mtl_buffers[i] = (__bridge const void*)cached[i];
+    }
     buf->mtl_buf = sg_make_buffer(&buf_desc);
     buf->data_size = buf_desc.size;
 

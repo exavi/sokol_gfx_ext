@@ -80,7 +80,7 @@ sg_buffer _sgext_gl_make_storage_buffer(sg_buffer_desc* desc)
         sg_buffer buffer = sg_make_buffer(desc);
 
         _sg_buffer_t* sbuf = _sg_lookup_buffer(buffer.id);
-        for (int slot = 0; slot < SG_NUM_INFLIGHT_FRAMES; slot++)
+        for (int slot = 0; slot < sbuf->cmn.num_slots; slot++)
         {
             glBindBuffer(GL_SHADER_STORAGE_BUFFER, sbuf->gl.buf[slot]);
             glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, (GLsizeiptr)data.size, data.ptr);
@@ -126,7 +126,7 @@ sg_buffer _sgext_mtl_make_storage_buffer(sg_buffer_desc* desc)
         sg_buffer buffer = sg_make_buffer(desc);
 
         _sg_buffer_t* sbuf = _sg_lookup_buffer(buffer.id);
-        for (int slot = 0; slot < SG_NUM_INFLIGHT_FRAMES; slot++)
+        for (int slot = 0; slot < sbuf->cmn.num_slots; slot++)
         {
             id<MTLBuffer> mtl_buf = _sg_mtl_id(sbuf->mtl.buf[slot]);
             memcpy(mtl_buf.contents, data.ptr, data.size);
