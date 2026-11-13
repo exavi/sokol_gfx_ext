@@ -85,7 +85,7 @@ void _sgext_gl_wait_for_gpu(void)
 void _sgext_mtl_commit_and_wait(void)
 {
     // Grab command buffer reference before commit (ARC will retain it)
-    id<MTLCommandBuffer> cmd_buffer = (__bridge id<MTLCommandBuffer>)_sg.mtl.cmd_buffer;
+    id<MTLCommandBuffer> cmd_buffer = _sg.mtl.cmd_buffer;
 
     sg_commit();
 
@@ -97,7 +97,11 @@ void _sgext_mtl_commit_and_wait(void)
 void _sgext_mtl_wait_for_gpu(void)
 {
     // Ensure all prior GPU work on the command queue completes
-    id<MTLCommandQueue> cmd_queue = (__bridge id<MTLCommandQueue>)_sg.mtl.cmd_queue;
+    if (_sg.mtl.cmd_buffer) {
+        _sgext_mtl_commit_and_wait();
+        return;
+    }
+    id<MTLCommandQueue> cmd_queue = _sg.mtl.cmd_queue;
     id<MTLCommandBuffer> sync_buffer = [cmd_queue commandBuffer];
     [sync_buffer commit];
     [sync_buffer waitUntilCompleted];

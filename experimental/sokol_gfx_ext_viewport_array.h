@@ -215,7 +215,7 @@ static void _sgext_mtl_apply_viewport_array(const sgext_viewport_desc* viewports
         mtl_viewports[i].znear = (double)viewports[i].min_depth;
         mtl_viewports[i].zfar = (double)viewports[i].max_depth;
     }
-    [(__bridge id<MTLRenderCommandEncoder>)_sg.mtl.render_cmd_encoder
+    [_sg.mtl.render_cmd_encoder
         setViewports:mtl_viewports count:(NSUInteger)count];
 }
 
@@ -250,7 +250,7 @@ static void _sgext_mtl_apply_scissor_array(const sgext_scissor_desc* scissors, i
         mtl_scissors[i].width = (NSUInteger)(x1 - x0);
         mtl_scissors[i].height = (NSUInteger)(y1 - y0);
     }
-    [(__bridge id<MTLRenderCommandEncoder>)_sg.mtl.render_cmd_encoder
+    [_sg.mtl.render_cmd_encoder
         setScissorRects:mtl_scissors count:(NSUInteger)count];
 }
 

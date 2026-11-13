@@ -203,6 +203,9 @@ typedef struct _sgext_gl_mutable_range {
 typedef struct _sgext_gl_transfer_buffer {
     uint32_t _start_canary;
     const _sg_image_t* img;
+    int mip_level;
+    int width;
+    int height;
     bool is_depth_format;
     uint32_t pbos[SG_NUM_INFLIGHT_FRAMES];
     GLsync fences[SG_NUM_INFLIGHT_FRAMES];
@@ -218,7 +221,7 @@ static void _sgext_gl_init_transfer_buffer(_sgext_transfer_buffer* buf)
     const _sg_image_t* img = buf->img;
     sg_pixelformat_info format_info = sg_query_pixelformat(img->cmn.pixel_format);
 
-    uint32_t data_size = img->cmn.width * img->cmn.height * format_info.bytes_per_pixel;
+    uint32_t data_size = buf->width * buf->height * format_info.bytes_per_pixel;
 
     glGenBuffers(SG_NUM_INFLIGHT_FRAMES, buf->pbos);
     for (int i = 0; i < SG_NUM_INFLIGHT_FRAMES; ++i)
@@ -276,6 +279,9 @@ static sgext_transfer_buffer _sgext_gl_make_transfer_buffer(const sgext_transfer
     }
 
     buf->img = img;
+    buf->mip_level = view->cmn.img.mip_level;
+    buf->width = _sg_miplevel_dim(img->cmn.width, buf->mip_level);
+    buf->height = _sg_miplevel_dim(img->cmn.height, buf->mip_level);
     buf->is_depth_format = (img->cmn.pixel_format == SG_PIXELFORMAT_DEPTH
                          || img->cmn.pixel_format == SG_PIXELFORMAT_DEPTH_STENCIL);
 
@@ -399,7 +405,7 @@ static void _sgext_gl_transfer_begin_readback(_sgext_transfer_buffer* buf)
     }
     else
     {
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, img->gl.tex[0], 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, img->gl.tex[0], buf->mip_level);
     }
 
     glBindBuffer(GL_PIXEL_PACK_BUFFER, buf->pbos[buf->active_slot]);
@@ -410,7 +416,7 @@ static void _sgext_gl_transfer_begin_readback(_sgext_transfer_buffer* buf)
     glReadBuffer(mode);
     // ensure tightly-packed rows for PBO readback
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, img->cmn.width, img->cmn.height, format, type, 0);
+    glReadPixels(0, 0, buf->width, buf->height, format, type, 0);
 
     if (buf->fences[buf->active_slot])
         glDeleteSync(buf->fences[buf->active_slot]);
@@ -485,7 +491,7 @@ static size_t _sgext_gl_calc_offset(_sgext_transfer_buffer* buf, uint32_t x, uin
     const _sg_image_t* img = buf->img;
 
     sg_pixelformat_info format_info = sg_query_pixelformat(img->cmn.pixel_format);
-    return (y * img->cmn.width + x) * format_info.bytes_per_pixel;
+    return (y * buf->width + x) * format_info.bytes_per_pixel;
 }
 
 static void _sgext_gl_transfer_read(sgext_transfer_buffer cap_buf, uint32_t x, uint32_t y, void* dst, size_t size)
@@ -632,7 +638,7 @@ static void _sgext_mtl_transfer_copy(sgext_transfer_buffer buf_dst)
     // into it would silently drop the copy. Use a one-shot command buffer.
     bool scoped_cmd_buffer = false;
     if (commandBuffer == nil) {
-        id<MTLCommandQueue> cmd_queue = (__bridge id<MTLCommandQueue>)_sg.mtl.cmd_queue;
+        id<MTLCommandQueue> cmd_queue = _sg.mtl.cmd_queue;
         commandBuffer = [cmd_queue commandBuffer];
         scoped_cmd_buffer = true;
     }
@@ -641,10 +647,10 @@ static void _sgext_mtl_transfer_copy(sgext_transfer_buffer buf_dst)
 
     const _sg_image_t* img = buf->img;
 
-    id<MTLTexture> src_mtl_img = (__bridge id<MTLTexture>)_sg_mtl_id(img->mtl.tex[img->cmn.active_slot]);
+    id<MTLTexture> src_mtl_img = _sg_mtl_id(img->mtl.tex[img->cmn.active_slot]);
 
     const _sg_buffer_t* raw_buf = _sg_lookup_buffer(buf->mtl_buf.id);
-    id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)_sg_mtl_id(raw_buf->mtl.buf[buf->active_slot]);
+    id<MTLBuffer> mtl_buf = _sg_mtl_id(raw_buf->mtl.buf[buf->active_slot]);
 
     sg_pixelformat_info format_info = sg_query_pixelformat(img->cmn.pixel_format);
 
@@ -684,8 +690,8 @@ static void _sgext_mtl_copy_view_to_image(sg_view src_view, sg_image dst_image)
     id<MTLCommandBuffer> commandBuffer = _sg.mtl.cmd_buffer;
     id<MTLBlitCommandEncoder> blitEncoder = [commandBuffer blitCommandEncoder];
 
-    id<MTLTexture> src_mtl_img = (__bridge id<MTLTexture>)_sg_mtl_id(src_img->mtl.tex[src_img->cmn.active_slot]);
-    id<MTLTexture> dst_mtl_img = (__bridge id<MTLTexture>)_sg_mtl_id(dst_img->mtl.tex[dst_img->cmn.active_slot]);
+    id<MTLTexture> src_mtl_img = _sg_mtl_id(src_img->mtl.tex[src_img->cmn.active_slot]);
+    id<MTLTexture> dst_mtl_img = _sg_mtl_id(dst_img->mtl.tex[dst_img->cmn.active_slot]);
 
     [blitEncoder copyFromTexture:src_mtl_img
                      sourceSlice:0
@@ -719,7 +725,7 @@ static void _sgext_mtl_transfer_read(sgext_transfer_buffer cap_buf, uint32_t x, 
     size_t offset = _sgext_mtl_calc_offset(buf, x, y);
 
     const _sg_buffer_t* raw_buf = _sg_lookup_buffer(buf->mtl_buf.id);
-    id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)_sg_mtl_id(raw_buf->mtl.buf[active_slot]);
+    id<MTLBuffer> mtl_buf = _sg_mtl_id(raw_buf->mtl.buf[active_slot]);
     uint8_t* src = (uint8_t*)[mtl_buf contents];
     memcpy(dst, &src[offset], size);
 }
@@ -732,7 +738,7 @@ static sg_range _sgext_mtl_transfer_get_data_range(sgext_transfer_buffer cap_buf
     int active_slot = (buf->active_slot + 1) % SG_NUM_INFLIGHT_FRAMES; // get previous
 
     const _sg_buffer_t* raw_buf = _sg_lookup_buffer(buf->mtl_buf.id);
-    id<MTLBuffer> mtl_buf = (__bridge id<MTLBuffer>)_sg_mtl_id(raw_buf->mtl.buf[active_slot]);
+    id<MTLBuffer> mtl_buf = _sg_mtl_id(raw_buf->mtl.buf[active_slot]);
     uint8_t* src = (uint8_t*)[mtl_buf contents];
     return (sg_range){src, buf->data_size};
 }

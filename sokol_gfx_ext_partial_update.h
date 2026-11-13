@@ -285,7 +285,7 @@ _SOKOL_PRIVATE void _sgext_mtl_copy_image_region_data(const _sg_image_t* img, __
                                                                                                height:upd_region->height
                                                                                               mipmapped:NO];
             tmp_desc.storageMode = MTLStorageModeShared;
-            id<MTLTexture> tmp_mtl_tex = [(__bridge id<MTLDevice>)_sg.mtl.device newTextureWithDescriptor:tmp_desc];
+            id<MTLTexture> tmp_mtl_tex = [_sg.mtl.device newTextureWithDescriptor:tmp_desc];
 
             // Upload CPU data to temp texture
             [tmp_mtl_tex replaceRegion:MTLRegionMake2D(0, 0, upd_region->width, upd_region->height)
@@ -294,7 +294,7 @@ _SOKOL_PRIVATE void _sgext_mtl_copy_image_region_data(const _sg_image_t* img, __
                            bytesPerRow:bytes_per_row];
 
             // Blit from temp texture to private texture
-            id<MTLBlitCommandEncoder> blitEncoder = [(__bridge id<MTLCommandBuffer>)_sg.mtl.cmd_buffer blitCommandEncoder];
+            id<MTLBlitCommandEncoder> blitEncoder = [_sg.mtl.cmd_buffer blitCommandEncoder];
             [blitEncoder copyFromTexture:tmp_mtl_tex
                              sourceSlice:0
                              sourceLevel:0
@@ -327,7 +327,7 @@ _SOKOL_PRIVATE void _sgext_mtl_update_image_region(_sg_image_t* img, const sgext
             img->cmn.active_slot = 0;
         }
     }
-    __unsafe_unretained id<MTLTexture> mtl_tex = (__bridge id<MTLTexture>)_sg_mtl_id(img->mtl.tex[img->cmn.active_slot]);
+    __unsafe_unretained id<MTLTexture> mtl_tex = _sg_mtl_id(img->mtl.tex[img->cmn.active_slot]);
     _sgext_mtl_copy_image_region_data(img, mtl_tex, region, data);
 }
 
